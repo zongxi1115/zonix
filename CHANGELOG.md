@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Fixed the README logo URL so PyPI can render it from GitHub.
+- Prepared the first PyPI distribution.
+
 ## 0.2.0
 
 - Added provider-level structured output control:

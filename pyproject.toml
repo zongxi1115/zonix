@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zonix"
-version = "0.2.0"
+version = "0.2.1"
 description = "Explicit, serializable AI workflow primitives inspired by pydantic-ai."
 readme = "README.md"
 requires-python = ">=3.11"

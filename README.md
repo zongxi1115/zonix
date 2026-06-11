@@ -1,6 +1,6 @@
 # Zonix
 
-![Zonix logo](logo.png)
+![Zonix logo](https://raw.githubusercontent.com/zongxi1115/zonix/main/logo.png)
 
 Zonix is a Python AI workflow framework with explicit agents and a serializable
 run engine. It borrows the clarity of pydantic-ai's `Agent`, then adds first
@@ -281,5 +281,5 @@ the run engine should make every step inspectable.
 
 ## Tutorials
 
-- [中文多章节教程](docs/tutorial.zh-CN.md)
-- [Real provider smoke script](scripts/smoke_real_provider.py)
+- [中文多章节教程](https://github.com/zongxi1115/zonix/blob/main/docs/tutorial.zh-CN.md)
+- [Real provider smoke script](https://github.com/zongxi1115/zonix/blob/main/scripts/smoke_real_provider.py)
