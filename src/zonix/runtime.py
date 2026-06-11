@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable
 
 from .events import ErrorEvent, Finish, NodeEnd, NodeStart
 from .exceptions import RunPaused
-from .types import Message, RunResult, RunState, Span, Usage
+from .types import Message, MessageLike, RunResult, RunState, Span, Usage, coerce_messages
 
 
 class EventBus:
@@ -25,6 +25,7 @@ async def run_node(
     ctx: Any = None,
     session: Any = None,
     extra: str | None = None,
+    message_history: list[MessageLike] | None = None,
     approvals: dict[str, Any] | None = None,
     run_id: str | None = None,
     emit: Callable[[Any], Awaitable[None]] | None = None,
@@ -39,6 +40,7 @@ async def run_node(
         trace=trace,
         bus=bus,
         session=session,
+        message_history=coerce_messages(message_history),
         approvals=approvals or {},
         extra=extra,
         run_id=run_id or trace.attributes.get("run_id") or "",
@@ -68,6 +70,7 @@ async def run_node(
             ctx=ctx,
             session=session,
             extra=extra,
+            message_history=message_history,
             approvals=next_approvals,
             run_id=state.run_id,
             emit=emit,
@@ -113,6 +116,7 @@ async def stream_node(
     ctx: Any = None,
     session: Any = None,
     extra: str | None = None,
+    message_history: list[MessageLike] | None = None,
     approvals: dict[str, Any] | None = None,
 ) -> AsyncIterator[Any]:
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -128,6 +132,7 @@ async def stream_node(
                 ctx=ctx,
                 session=session,
                 extra=extra,
+                message_history=message_history,
                 approvals=approvals,
                 emit=emit,
             )

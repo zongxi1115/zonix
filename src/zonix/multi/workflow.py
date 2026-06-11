@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from zonix.runtime import run_node, stream_node
-from zonix.types import Node, RunResult, RunState
+from zonix.types import MessageLike, Node, RunResult, RunState
 
 
 @dataclass
@@ -70,14 +70,38 @@ class WorkflowNode:
             st.scratch[getattr(step, "node", step).__class__.__name__] = current
         return current
 
-    async def solve(self, task: Any, *, ctx: Any = None, session: Any = None) -> Any:
-        return (await self.run(task, ctx=ctx, session=session)).output
+    async def solve(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+    ) -> Any:
+        return (
+            await self.run(task, ctx=ctx, session=session, message_history=message_history)
+        ).output
 
-    async def run(self, task: Any, *, ctx: Any = None, session: Any = None, trace: bool = True) -> RunResult:
-        return await run_node(self, task, ctx=ctx, session=session)
+    async def run(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+        trace: bool = True,
+    ) -> RunResult:
+        return await run_node(self, task, ctx=ctx, session=session, message_history=message_history)
 
-    def stream(self, task: Any, *, ctx: Any = None, session: Any = None) -> AsyncIterator[Any]:
-        return stream_node(self, task, ctx=ctx, session=session)
+    def stream(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+    ) -> AsyncIterator[Any]:
+        return stream_node(self, task, ctx=ctx, session=session, message_history=message_history)
 
 
 class WorkflowBuilder:

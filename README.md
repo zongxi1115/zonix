@@ -144,6 +144,36 @@ All three calls use the same run engine. The engine owns prompt assembly, model
 calls, tool execution, output validation, usage aggregation, spans, checkpoints,
 and event emission.
 
+## Manual message history
+
+You can pass an explicit prior transcript when you want to replay or continue
+history that was stored outside Zonix:
+
+```python
+from zonix import (
+    ToolCall,
+    assistant_message,
+    assistant_tool_call_message,
+    tool_message,
+    user_message,
+)
+
+call = ToolCall(call_id="call_1", tool="lookup_user", input={"email": "a@example.com"})
+
+history = [
+    user_message("Find this user."),
+    assistant_tool_call_message(call),
+    tool_message("call_1", "lookup_user", {"id": "user_123"}),
+    assistant_message("The user exists."),
+]
+
+answer = await assistant("Continue from there.", message_history=history)
+```
+
+`message_history` accepts `Message` objects or dicts with the same shape. The
+same parameter is available on `agent.run`, `agent.stream`, `workflow.solve`,
+`workflow.run`, `team.solve`, and `team.run`.
+
 ## Workflow
 
 ```python

@@ -124,6 +124,7 @@ class RunEngine:
         instructions = await self._instructions(task, st)
         if instructions:
             messages.append(Message(role="system", content=instructions))
+        messages.extend(st.message_history)
         if st.session is not None:
             history = await st.session.recall(task, st.ctx, memory=self.agent.memory)
             messages.extend(history)

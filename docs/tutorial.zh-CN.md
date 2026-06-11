@@ -123,6 +123,37 @@ reviewer.repair_output(2)
 - Pydantic 类型保持短而明确，少用过深嵌套。
 - 对外部网关保留 prompt fallback，因为不是所有兼容服务都完整支持 `response_format`。
 
+## 第 3.5 章：用户手动构建消息历史
+
+如果历史存储在你自己的数据库里，可以手动构建 transcript，再传给当前 run：
+
+```python
+from zonix import (
+    ToolCall,
+    assistant_message,
+    assistant_tool_call_message,
+    tool_message,
+    user_message,
+)
+
+call = ToolCall(call_id="call_1", tool="search_code", input={"query": "login"})
+
+history = [
+    user_message("先查一下登录逻辑。"),
+    assistant_tool_call_message(call),
+    tool_message("call_1", "search_code", {"files": ["auth/login.py"]}),
+    assistant_message("登录逻辑在 auth/login.py。"),
+]
+
+plan = await planner("继续规划验证码改造。", message_history=history)
+```
+
+`message_history` 支持 `Message` 对象，也支持同结构的 dict。这个参数也能传给
+`agent.run`、`agent.stream`、`workflow.solve/run/stream` 和 `team.solve/run/stream`。
+
+这和 `Session` 不冲突：`message_history` 是你显式传入的外部历史，`Session`
+是 Zonix 管理的历史和记忆策略。
+
 ## 第 4 章：工具调用
 
 批量挂工具：

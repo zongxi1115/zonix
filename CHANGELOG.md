@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Added first-class manually supplied `message_history` for agents, workflows,
+  and teams.
+- Added message helper constructors for user, system, assistant, assistant
+  tool-call, and tool-result messages.
+
 ## 0.2.1
 
 - Fixed the README logo URL so PyPI can render it from GitHub.

@@ -8,7 +8,7 @@ from pydantic import TypeAdapter
 
 from zonix.exceptions import MaxStepsExceeded
 from zonix.runtime import run_node, stream_node
-from zonix.types import Node, Route, RunResult, RunState
+from zonix.types import MessageLike, Node, Route, RunResult, RunState
 
 
 class RouterNode:
@@ -63,14 +63,38 @@ class TeamNode:
             st.scratch[node.name] = current
         raise MaxStepsExceeded(f"Team {self.name!r} exceeded {self.max_steps} steps.")
 
-    async def solve(self, task: Any, *, ctx: Any = None, session: Any = None) -> Any:
-        return (await self.run(task, ctx=ctx, session=session)).output
+    async def solve(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+    ) -> Any:
+        return (
+            await self.run(task, ctx=ctx, session=session, message_history=message_history)
+        ).output
 
-    async def run(self, task: Any, *, ctx: Any = None, session: Any = None, trace: bool = True) -> RunResult:
-        return await run_node(self, task, ctx=ctx, session=session)
+    async def run(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+        trace: bool = True,
+    ) -> RunResult:
+        return await run_node(self, task, ctx=ctx, session=session, message_history=message_history)
 
-    def stream(self, task: Any, *, ctx: Any = None, session: Any = None) -> AsyncIterator[Any]:
-        return stream_node(self, task, ctx=ctx, session=session)
+    def stream(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+    ) -> AsyncIterator[Any]:
+        return stream_node(self, task, ctx=ctx, session=session, message_history=message_history)
 
 
 class TeamBuilder:

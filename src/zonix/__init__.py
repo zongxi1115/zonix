@@ -13,7 +13,22 @@ from .events import (
     ToolOutputAvailable,
 )
 from .spec import Agent, agent, router, team, workflow
-from .types import Message, PendingApproval, Route, RunResult, RunState, Span, ToolCall, Usage
+from .types import (
+    Message,
+    PendingApproval,
+    Route,
+    RunResult,
+    RunState,
+    Span,
+    ToolCall,
+    Usage,
+    assistant_message,
+    assistant_tool_call_message,
+    coerce_messages,
+    system_message,
+    tool_message,
+    user_message,
+)
 
 __all__ = [
     "Agent",
@@ -38,7 +53,13 @@ __all__ = [
     "ToolOutputAvailable",
     "Usage",
     "agent",
+    "assistant_message",
+    "assistant_tool_call_message",
+    "coerce_messages",
     "router",
+    "system_message",
     "team",
+    "tool_message",
+    "user_message",
     "workflow",
 ]

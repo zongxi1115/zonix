@@ -9,7 +9,7 @@ from .multi.team import RouterNode, TeamBuilder
 from .multi.workflow import WorkflowBuilder
 from .runtime import run_node, stream_node
 from .tools import ToolDefinition
-from .types import RunResult, RunState
+from .types import MessageLike, RunResult, RunState
 
 
 OutT = TypeVar("OutT")
@@ -97,8 +97,15 @@ class Agent(Generic[OutT]):
         ctx: Any = None,
         session: Any = None,
         extra: str | None = None,
+        message_history: list[MessageLike] | None = None,
     ) -> OutT:
-        result = await self.run(task, ctx=ctx, session=session, extra=extra)
+        result = await self.run(
+            task,
+            ctx=ctx,
+            session=session,
+            extra=extra,
+            message_history=message_history,
+        )
         return result.output
 
     async def run(
@@ -108,9 +115,17 @@ class Agent(Generic[OutT]):
         ctx: Any = None,
         session: Any = None,
         extra: str | None = None,
+        message_history: list[MessageLike] | None = None,
         trace: bool = True,
     ) -> RunResult:
-        return await run_node(self, task, ctx=ctx, session=session, extra=extra)
+        return await run_node(
+            self,
+            task,
+            ctx=ctx,
+            session=session,
+            extra=extra,
+            message_history=message_history,
+        )
 
     def stream(
         self,
@@ -119,8 +134,16 @@ class Agent(Generic[OutT]):
         ctx: Any = None,
         session: Any = None,
         extra: str | None = None,
+        message_history: list[MessageLike] | None = None,
     ) -> AsyncIterator[Any]:
-        return stream_node(self, task, ctx=ctx, session=session, extra=extra)
+        return stream_node(
+            self,
+            task,
+            ctx=ctx,
+            session=session,
+            extra=extra,
+            message_history=message_history,
+        )
 
     async def invoke(self, x: Any, st: RunState) -> Any:
         return await RunEngine(self).invoke(x, st)

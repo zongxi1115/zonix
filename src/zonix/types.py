@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Literal, Protocol, TypeVar
+from collections.abc import Sequence
+from typing import Any, Awaitable, Callable, Literal, Protocol, TypeAlias, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -41,10 +43,64 @@ class Message(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+MessageLike: TypeAlias = Message | dict[str, Any]
+
+
 class ToolCall(BaseModel):
     call_id: str = Field(default_factory=lambda: f"call_{uuid.uuid4().hex}")
     tool: str
     input: dict[str, Any] = Field(default_factory=dict)
+
+
+def system_message(content: str, **data: Any) -> Message:
+    return Message(role="system", content=content, data=data)
+
+
+def user_message(content: str, **data: Any) -> Message:
+    return Message(role="user", content=content, data=data)
+
+
+def assistant_message(content: str | None = None, **data: Any) -> Message:
+    return Message(role="assistant", content=content, data=data)
+
+
+def assistant_tool_call_message(
+    *tool_calls: ToolCall | dict[str, Any],
+    content: str | None = None,
+) -> Message:
+    calls = [
+        call.model_dump(mode="json")
+        if isinstance(call, ToolCall)
+        else ToolCall.model_validate(call).model_dump(mode="json")
+        for call in tool_calls
+    ]
+    return Message(role="assistant", content=content, data={"tool_calls": calls})
+
+
+def tool_message(
+    call_id: str,
+    tool: str,
+    output: Any,
+    *,
+    content: str | None = None,
+) -> Message:
+    from .serialization import to_jsonable
+
+    return Message(
+        role="tool",
+        name=tool,
+        tool_call_id=call_id,
+        content=content if content is not None else json.dumps(to_jsonable(output), ensure_ascii=False),
+    )
+
+
+def coerce_messages(messages: Sequence[MessageLike] | None) -> list[Message]:
+    if messages is None:
+        return []
+    return [
+        message if isinstance(message, Message) else Message.model_validate(message)
+        for message in messages
+    ]
 
 
 class PendingApproval(BaseModel):
@@ -97,6 +153,7 @@ class RunState:
     trace: Span
     bus: Any
     session: Any = None
+    message_history: list[Message] = field(default_factory=list)
     approvals: dict[str, Any] = field(default_factory=dict)
     extra: str | None = None
     run_id: str = field(default_factory=lambda: f"run_{uuid.uuid4().hex}")
