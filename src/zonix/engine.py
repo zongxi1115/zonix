@@ -1,0 +1,260 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+from typing import Any
+
+from pydantic import BaseModel, TypeAdapter
+
+from .events import (
+    ApprovalRequired,
+    TextDelta,
+    TextEnd,
+    TextStart,
+    ToolInputAvailable,
+    ToolInputStart,
+    ToolOutputAvailable,
+)
+from .exceptions import (
+    MaxToolRoundsExceeded,
+    OutputValidationError,
+    RunPaused,
+    ToolApprovalRejected,
+)
+from .hitl import approval_key, pending_from_call
+from .models import ModelRequest, ModelResponse
+from .serialization import to_jsonable
+from .tools import ToolContext, ToolDefinition
+from .types import Message, RunState, ToolCall
+
+
+class RunEngine:
+    def __init__(self, agent: Any) -> None:
+        self.agent = agent
+
+    async def invoke(self, task: Any, st: RunState) -> Any:
+        attempts = self.agent.retry_attempts + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                if self.agent.timeout_seconds is None:
+                    return await self._invoke_once(task, st)
+                return await asyncio.wait_for(
+                    self._invoke_once(task, st),
+                    timeout=self.agent.timeout_seconds,
+                )
+            except self.agent.retry_on as exc:
+                last_error = exc
+                st.trace.record({"attempt": attempt + 1, "error": str(exc)})
+                if attempt + 1 >= attempts:
+                    break
+        if self.agent.fallback_node is not None:
+            return await self.agent.fallback_node.invoke(task, st.scoped(self.agent.fallback_node.name))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Agent invocation failed without an exception.")
+
+    async def _invoke_once(self, task: Any, st: RunState) -> Any:
+        messages = await self._build_messages(task, st)
+        tools = {tool.name: tool for tool in self.agent.tools}
+
+        for _round in range(self.agent.max_tool_rounds + 1):
+            request = ModelRequest(
+                messages=messages,
+                tools=[tool.model_tool_schema() for tool in tools.values()],
+                output_schema=self._output_schema(),
+                output_name=self._output_name(),
+                metadata={"agent": self.agent.name, "role": self.agent.role},
+            )
+            response = await self._call_model(request, st)
+            st.usage += response.usage
+
+            if response.text:
+                messages.append(Message(role="assistant", content=response.text))
+
+            if response.tool_calls:
+                for call in response.tool_calls:
+                    await self._run_tool(call, tools, messages, st)
+                continue
+
+            output = self._validate_output(response)
+            st.messages = messages
+            st.scratch[self.agent.name] = output
+            await self._remember(task, output, st)
+            return output
+
+        raise MaxToolRoundsExceeded(
+            f"Agent {self.agent.name!r} exceeded {self.agent.max_tool_rounds} tool rounds."
+        )
+
+    async def _build_messages(self, task: Any, st: RunState) -> list[Message]:
+        messages: list[Message] = []
+        instructions = await self._instructions(task, st)
+        if instructions:
+            messages.append(Message(role="system", content=instructions))
+        if st.session is not None:
+            history = await st.session.recall(task, st.ctx, memory=self.agent.memory)
+            messages.extend(history)
+        messages.append(Message(role="user", content=str(task)))
+        if st.extra:
+            messages.append(Message(role="user", content=st.extra, data={"kind": "extra"}))
+        return messages
+
+    async def _instructions(self, task: Any, st: RunState) -> str:
+        parts: list[str] = []
+        if self.agent.role:
+            parts.append(f"Role: {self.agent.role}")
+        for prompt in self.agent.prompts:
+            if isinstance(prompt, str):
+                parts.append(prompt)
+                continue
+            value = self._call_prompt(prompt, task, st)
+            if inspect.isawaitable(value):
+                value = await value
+            if value:
+                parts.append(str(value))
+        schema = self._output_schema()
+        if schema is not None:
+            parts.append(
+                "Return only JSON that validates against this output schema:\n"
+                + json.dumps(schema, ensure_ascii=False)
+            )
+        return "\n\n".join(parts)
+
+    def _call_prompt(self, prompt: Any, task: Any, st: RunState) -> Any:
+        signature = inspect.signature(prompt)
+        params = list(signature.parameters)
+        if len(params) == 0:
+            return prompt()
+        if len(params) == 1:
+            return prompt(st.ctx)
+        return prompt(st.ctx, task)
+
+    async def _call_model(self, request: ModelRequest, st: RunState) -> ModelResponse:
+        if st.bus._emit is not None:
+            return await self.agent.model.stream_complete(request, st.bus.publish, st.path)
+        response = await self.agent.model.complete(request)
+        await self._emit_response(response, st)
+        return response
+
+    async def _emit_response(self, response: ModelResponse, st: RunState) -> None:
+        if response.text:
+            await st.bus.publish(TextStart(st.path, "text_0"))
+            await st.bus.publish(TextDelta(st.path, "text_0", response.text))
+            await st.bus.publish(TextEnd(st.path, "text_0"))
+        for call in response.tool_calls:
+            await st.bus.publish(ToolInputStart(st.path, call.call_id, call.tool))
+            await st.bus.publish(ToolInputAvailable(st.path, call.call_id, call.tool, call.input))
+
+    async def _run_tool(
+        self,
+        call: ToolCall,
+        tools: dict[str, ToolDefinition],
+        messages: list[Message],
+        st: RunState,
+    ) -> None:
+        if call.tool not in tools:
+            raise KeyError(f"Agent {self.agent.name!r} has no tool named {call.tool!r}.")
+
+        tool = tools[call.tool]
+        parsed_input = tool.parse_input(call.input)
+        normalized_call = ToolCall(call_id=call.call_id, tool=call.tool, input=parsed_input)
+        approved_input = await self._approval_for(tool, normalized_call, st)
+        if approved_input is not None and isinstance(approved_input, dict):
+            parsed_input = tool.parse_input(approved_input)
+
+        ctx = ToolContext(deps=st.ctx, usage=st.usage, state=st, agent=self.agent)
+        output = await tool.invoke(ctx, parsed_input)
+        st.usage.tool_calls += 1
+        await st.bus.publish(ToolOutputAvailable(st.path, call.call_id, to_jsonable(output)))
+        messages.append(
+            Message(
+                role="tool",
+                name=tool.name,
+                tool_call_id=call.call_id,
+                content=json.dumps(to_jsonable(output), ensure_ascii=False),
+            )
+        )
+
+    async def _approval_for(
+        self,
+        tool: ToolDefinition,
+        call: ToolCall,
+        st: RunState,
+    ) -> dict[str, Any] | bool | None:
+        if not tool.approval:
+            return None
+        key = approval_key(call.tool, call.input)
+        decision = st.approvals.get(call.call_id, st.approvals.get(key))
+        if decision is False:
+            raise ToolApprovalRejected(f"Tool call {call.call_id} was rejected.")
+        if decision is True or isinstance(decision, dict):
+            return decision
+
+        pending = pending_from_call(call)
+        await st.bus.publish(ApprovalRequired(st.path, call.call_id, call.tool, call.input))
+        snapshot = {
+            "run_id": st.run_id,
+            "path": st.path,
+            "pending": pending,
+            "messages": messages_dump(st.messages),
+            "scratch": to_jsonable(st.scratch),
+            "trace": to_jsonable(st.trace),
+            "usage": to_jsonable(st.usage),
+        }
+        raise RunPaused(pending=pending, snapshot=snapshot)
+
+    def _output_schema(self) -> dict[str, Any] | None:
+        output_type = self.agent.output_type
+        if output_type is None or output_type is Any:
+            return None
+        return TypeAdapter(output_type).json_schema()
+
+    def _output_name(self) -> str | None:
+        output_type = self.agent.output_type
+        if output_type is None:
+            return None
+        return getattr(output_type, "__name__", repr(output_type))
+
+    def _validate_output(self, response: ModelResponse) -> Any:
+        output_type = self.agent.output_type
+        raw = response.output if response.output is not None else response.text
+        if output_type is None or output_type is Any:
+            return raw
+        try:
+            if isinstance(raw, output_type):
+                return raw
+        except TypeError:
+            pass
+        data = raw
+        if isinstance(raw, str) and output_type is not str:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise OutputValidationError(
+                    f"Agent {self.agent.name!r} expected {self._output_name()} JSON, got text."
+                ) from exc
+        try:
+            if isinstance(output_type, type) and issubclass(output_type, BaseModel):
+                return output_type.model_validate(data)
+        except TypeError:
+            pass
+        try:
+            return TypeAdapter(output_type).validate_python(data)
+        except Exception as exc:
+            raise OutputValidationError(
+                f"Agent {self.agent.name!r} could not validate model output as {self._output_name()}."
+            ) from exc
+
+    async def _remember(self, task: Any, output: Any, st: RunState) -> None:
+        if st.session is None:
+            return
+        await st.session.remember(Message(role="user", content=str(task)))
+        await st.session.remember(
+            Message(role="assistant", content=json.dumps(to_jsonable(output), ensure_ascii=False))
+        )
+
+
+def messages_dump(messages: list[Message]) -> list[dict[str, Any]]:
+    return [message.model_dump(mode="json") for message in messages]
