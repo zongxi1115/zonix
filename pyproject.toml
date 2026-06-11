@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zonix"
-version = "0.1.0"
+version = "0.2.0"
 description = "Explicit, serializable AI workflow primitives inspired by pydantic-ai."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Zonix contributors" }]
+authors = [{ name = "zongxi1115", email = "zxwang1234321@gmail.com" }]
 keywords = ["ai", "agent", "workflow", "pydantic", "llm"]
 classifiers = [
   "Development Status :: 3 - Alpha",

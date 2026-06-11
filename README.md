@@ -39,6 +39,39 @@ pip install "zonix[openai]"
 pip install "zonix[anthropic]"
 ```
 
+## OpenAI-compatible and Anthropic-compatible endpoints
+
+Provider objects accept `base_url`, so OpenAI-compatible gateways and
+Anthropic-compatible gateways stay explicit and typed:
+
+```python
+import os
+
+from zonix.models import Anthropic, OpenAI
+
+openai_model = OpenAI(
+    model=os.environ["ZONIX_MODEL"],
+    api_key=os.environ["ZONIX_API_KEY"],
+    base_url=os.environ["ZONIX_BASE_URL"],
+)
+
+anthropic_model = Anthropic(
+    model=os.environ["ZONIX_MODEL"],
+    api_key=os.environ["ZONIX_API_KEY"],
+    base_url=os.environ["ZONIX_BASE_URL"],
+)
+```
+
+Run the real provider example:
+
+```bash
+export ZONIX_API_KEY="..."
+export ZONIX_PROVIDER="openai"
+export ZONIX_BASE_URL="https://your-openai-compatible-host/v1"
+export ZONIX_MODEL="your-model"
+python examples/real_provider_case.py
+```
+
 ## Single agent
 
 ```python
@@ -245,3 +278,8 @@ zonix/
 
 Zonix is intentionally explicit: business code should say what it means, and
 the run engine should make every step inspectable.
+
+## Tutorials
+
+- [中文多章节教程](docs/tutorial.zh-CN.md)
+- [Real provider smoke script](scripts/smoke_real_provider.py)

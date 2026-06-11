@@ -40,6 +40,7 @@ class Agent(Generic[OutT]):
         self.prompts: list[str | Callable[..., Any]] = []
         self.retry_attempts = 0
         self.retry_on: type[BaseException] | tuple[type[BaseException], ...] = Exception
+        self.output_repair_attempts = 1
         self.timeout_seconds: float | None = None
         self.fallback_node: Any = None
 
@@ -79,6 +80,10 @@ class Agent(Generic[OutT]):
 
     def timeout(self, seconds: float) -> Agent[OutT]:
         self.timeout_seconds = seconds
+        return self
+
+    def repair_output(self, attempts: int = 1) -> Agent[OutT]:
+        self.output_repair_attempts = attempts
         return self
 
     def fallback(self, node: Any) -> Agent[OutT]:

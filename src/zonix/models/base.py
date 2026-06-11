@@ -8,6 +8,20 @@ from zonix.events import TextDelta, TextEnd, TextStart, ToolInputAvailable, Tool
 from zonix.types import Message, ToolCall, Usage
 
 
+OUTPUT_TOOL_NAME = "zonix_final_output"
+
+
+def output_tool_schema(schema: dict[str, Any], name: str | None = None) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": OUTPUT_TOOL_NAME,
+            "description": f"Return the final structured output for {name or 'this run'}.",
+            "parameters": schema,
+        },
+    }
+
+
 class ModelRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

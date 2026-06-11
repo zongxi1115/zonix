@@ -18,21 +18,37 @@ class OpenAI(BaseChatModel):
     temperature: float | None = None
     api_key: str | None = None
     base_url: str | None = None
+    native_structured_output: bool = True
+    fallback_to_prompt_output: bool = True
     settings: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.name = f"openai:{self.model}"
 
     def _messages(self, request: ModelRequest) -> list[dict[str, Any]]:
-        return [
-            {
+        messages: list[dict[str, Any]] = []
+        for message in request.messages:
+            item: dict[str, Any] = {
                 "role": message.role,
                 "content": message.content or "",
                 **({"name": message.name} if message.name and message.role != "tool" else {}),
                 **({"tool_call_id": message.tool_call_id} if message.tool_call_id else {}),
             }
-            for message in request.messages
-        ]
+            if message.role == "assistant" and message.data.get("tool_calls"):
+                item["content"] = message.content
+                item["tool_calls"] = [
+                    {
+                        "id": call["call_id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["tool"],
+                            "arguments": json.dumps(call.get("input", {}), ensure_ascii=False),
+                        },
+                    }
+                    for call in message.data["tool_calls"]
+                ]
+            messages.append(item)
+        return messages
 
     def _kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -42,9 +58,23 @@ class OpenAI(BaseChatModel):
         }
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
+        if (
+            self.native_structured_output
+            and request.output_schema is not None
+            and not request.tools
+            and "response_format" not in kwargs
+        ):
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": _schema_name(request.output_name),
+                    "strict": True,
+                    "schema": _openai_strict_schema(request.output_schema),
+                },
+            }
         if request.tools:
             kwargs["tools"] = request.tools
-            kwargs["tool_choice"] = "auto"
+            kwargs.setdefault("tool_choice", "auto")
         return kwargs
 
     async def _client(self) -> Any:
@@ -56,7 +86,15 @@ class OpenAI(BaseChatModel):
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         client = await self._client()
-        response = await client.chat.completions.create(**self._kwargs(request))
+        kwargs = self._kwargs(request)
+        try:
+            response = await client.chat.completions.create(**kwargs)
+        except Exception:
+            if not self.fallback_to_prompt_output or "response_format" not in kwargs:
+                raise
+            kwargs = dict(kwargs)
+            kwargs.pop("response_format", None)
+            response = await client.chat.completions.create(**kwargs)
         choice = response.choices[0].message
         calls: list[ToolCall] = []
         for tool_call in choice.tool_calls or []:
@@ -92,12 +130,22 @@ class OpenAI(BaseChatModel):
         path: tuple[str, ...],
     ) -> ModelResponse:
         client = await self._client()
-        stream = await client.chat.completions.create(**self._kwargs(request), stream=True)
+        kwargs = self._kwargs(request)
+        try:
+            stream = await client.chat.completions.create(**kwargs, stream=True)
+        except Exception:
+            if not self.fallback_to_prompt_output or "response_format" not in kwargs:
+                raise
+            kwargs = dict(kwargs)
+            kwargs.pop("response_format", None)
+            stream = await client.chat.completions.create(**kwargs, stream=True)
         text_parts: list[str] = []
         text_started = False
         tool_parts: dict[int, dict[str, Any]] = {}
 
         async for chunk in stream:
+            if not chunk.choices:
+                continue
             choice = chunk.choices[0]
             delta = choice.delta
             if delta.content:
@@ -149,3 +197,26 @@ class OpenAI(BaseChatModel):
             tool_calls=calls,
             usage=Usage(model_calls=1),
         )
+
+
+def _schema_name(name: str | None) -> str:
+    raw = name or "zonix_output"
+    cleaned = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in raw)
+    return cleaned[:64] or "zonix_output"
+
+
+def _openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    copied = json.loads(json.dumps(schema))
+    _close_objects(copied)
+    return copied
+
+
+def _close_objects(value: Any) -> None:
+    if isinstance(value, dict):
+        if value.get("type") == "object":
+            value.setdefault("additionalProperties", False)
+        for child in value.values():
+            _close_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            _close_objects(child)

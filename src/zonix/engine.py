@@ -58,8 +58,10 @@ class RunEngine:
     async def _invoke_once(self, task: Any, st: RunState) -> Any:
         messages = await self._build_messages(task, st)
         tools = {tool.name: tool for tool in self.agent.tools}
+        tool_rounds = 0
+        repair_rounds = 0
 
-        for _round in range(self.agent.max_tool_rounds + 1):
+        while tool_rounds <= self.agent.max_tool_rounds:
             request = ModelRequest(
                 messages=messages,
                 tools=[tool.model_tool_schema() for tool in tools.values()],
@@ -70,15 +72,44 @@ class RunEngine:
             response = await self._call_model(request, st)
             st.usage += response.usage
 
-            if response.text:
-                messages.append(Message(role="assistant", content=response.text))
-
             if response.tool_calls:
+                messages.append(
+                    Message(
+                        role="assistant",
+                        content=response.text,
+                        data={
+                            "tool_calls": [
+                                call.model_dump(mode="json") for call in response.tool_calls
+                            ]
+                        },
+                    )
+                )
+                tool_rounds += 1
                 for call in response.tool_calls:
                     await self._run_tool(call, tools, messages, st)
                 continue
 
-            output = self._validate_output(response)
+            if response.text:
+                messages.append(Message(role="assistant", content=response.text))
+
+            try:
+                output = self._validate_output(response)
+            except OutputValidationError as exc:
+                if repair_rounds >= self.agent.output_repair_attempts:
+                    raise
+                repair_rounds += 1
+                messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            "The previous response did not validate. "
+                            "Return a corrected JSON value only, with no Markdown or prose. "
+                            f"Validation error: {exc}"
+                        ),
+                        data={"kind": "output_repair", "attempt": repair_rounds},
+                    )
+                )
+                continue
             st.messages = messages
             st.scratch[self.agent.name] = output
             await self._remember(task, output, st)
@@ -117,7 +148,9 @@ class RunEngine:
         schema = self._output_schema()
         if schema is not None:
             parts.append(
-                "Return only JSON that validates against this output schema:\n"
+                "Return exactly one valid JSON value that validates against this output schema. "
+                "Do not include Markdown, prose, comments, or trailing text. "
+                "Use double quotes and valid JSON escaping.\n"
                 + json.dumps(schema, ensure_ascii=False)
             )
         return "\n\n".join(parts)
@@ -230,7 +263,7 @@ class RunEngine:
         data = raw
         if isinstance(raw, str) and output_type is not str:
             try:
-                data = json.loads(raw)
+                data = _load_json_text(raw)
             except json.JSONDecodeError as exc:
                 raise OutputValidationError(
                     f"Agent {self.agent.name!r} expected {self._output_name()} JSON, got text."
@@ -258,3 +291,45 @@ class RunEngine:
 
 def messages_dump(messages: list[Message]) -> list[dict[str, Any]]:
     return [message.model_dump(mode="json") for message in messages]
+
+
+def _load_json_text(text: str) -> Any:
+    stripped = text.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        candidate = _extract_json_candidate(stripped)
+        if candidate is None:
+            raise
+        return json.loads(candidate)
+
+
+def _extract_json_candidate(text: str) -> str | None:
+    starts = [index for index in (text.find("{"), text.find("[")) if index >= 0]
+    if not starts:
+        return None
+    start = min(starts)
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text[start:], start=start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
