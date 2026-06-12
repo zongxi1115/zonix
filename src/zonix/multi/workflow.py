@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from zonix.graph import GraphEdge, GraphNode, GraphSpec, safe_graph_id
 from zonix.runtime import run_node, stream_node
 from zonix.types import MessageLike, Node, RunResult, RunState
 
@@ -103,6 +104,24 @@ class WorkflowNode:
     ) -> AsyncIterator[Any]:
         return stream_node(self, task, ctx=ctx, session=session, message_history=message_history)
 
+    def graph(self) -> GraphSpec:
+        nodes: list[GraphNode] = [
+            GraphNode("start", "start", "start"),
+            GraphNode("end", "end", "end"),
+        ]
+        edges: list[GraphEdge] = []
+        previous = "start"
+        for index, step in enumerate(self.steps):
+            previous = _append_workflow_step(nodes, edges, previous, index, step)
+        edges.append(GraphEdge(previous, "end"))
+        return GraphSpec(self.name, nodes, edges)
+
+    def to_mermaid(self) -> str:
+        return self.graph().mermaid()
+
+    def save_graph(self, path: str) -> Any:
+        return self.graph().save(path)
+
 
 class WorkflowBuilder:
     def __init__(self, name: str) -> None:
@@ -149,3 +168,61 @@ class WorkflowBuilder:
         if not self._steps:
             raise ValueError("workflow requires at least one step")
         return WorkflowNode(self.name, list(self._steps))
+
+
+def _append_workflow_step(
+    nodes: list[GraphNode],
+    edges: list[GraphEdge],
+    previous: str,
+    index: int,
+    step: Any,
+) -> str:
+    if isinstance(step, NodeStep):
+        node_id = _step_id(index, step.node.name)
+        nodes.append(GraphNode(node_id, step.node.name, "node"))
+        edges.append(GraphEdge(previous, node_id))
+        return node_id
+    if isinstance(step, ParallelStep):
+        fork_id = f"parallel_{index}_fork"
+        join_id = f"parallel_{index}_join"
+        nodes.append(GraphNode(fork_id, "parallel", "parallel"))
+        nodes.append(GraphNode(join_id, "join", "join"))
+        edges.append(GraphEdge(previous, fork_id))
+        for node in step.nodes:
+            node_id = _step_id(index, node.name)
+            nodes.append(GraphNode(node_id, node.name, "node"))
+            edges.append(GraphEdge(fork_id, node_id))
+            edges.append(GraphEdge(node_id, join_id))
+        return join_id
+    if isinstance(step, BranchStep):
+        branch_id = f"branch_{index}"
+        join_id = f"branch_{index}_join"
+        nodes.append(GraphNode(branch_id, "branch", "branch"))
+        nodes.append(GraphNode(join_id, "join", "join"))
+        edges.append(GraphEdge(previous, branch_id))
+        then_id = _step_id(index, step.then_node.name)
+        nodes.append(GraphNode(then_id, step.then_node.name, "node"))
+        edges.append(GraphEdge(branch_id, then_id, "true"))
+        edges.append(GraphEdge(then_id, join_id))
+        if step.else_node is not None:
+            else_id = _step_id(index, step.else_node.name)
+            nodes.append(GraphNode(else_id, step.else_node.name, "node"))
+            edges.append(GraphEdge(branch_id, else_id, "false"))
+            edges.append(GraphEdge(else_id, join_id))
+        else:
+            edges.append(GraphEdge(branch_id, join_id, "false"))
+        return join_id
+    if isinstance(step, LoopStep):
+        node_id = _step_id(index, step.node.name)
+        nodes.append(GraphNode(node_id, f"{step.node.name} loop", "loop"))
+        edges.append(GraphEdge(previous, node_id))
+        edges.append(GraphEdge(node_id, node_id, f"until true / max {step.max_iters}"))
+        return node_id
+    node_id = _step_id(index, type(step).__name__)
+    nodes.append(GraphNode(node_id, type(step).__name__, "step"))
+    edges.append(GraphEdge(previous, node_id))
+    return node_id
+
+
+def _step_id(index: int, name: str) -> str:
+    return safe_graph_id(f"s_{index}_{name}")

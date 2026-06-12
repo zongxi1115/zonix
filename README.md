@@ -2,9 +2,26 @@
 
 ![Zonix logo](https://raw.githubusercontent.com/zongxi1115/zonix/main/logo.png)
 
+<p align="center"><strong>Call simply. Chain deeply. Trace everything.</strong></p>
+
 Zonix is a Python AI workflow framework with explicit agents and a serializable
 run engine. It borrows the clarity of pydantic-ai's `Agent`, then adds first
 class `workflow`, `team`, and `router` primitives on top of one execution model.
+
+The taste is deliberately practical: a beginner should be able to call one
+object and get a useful answer, while an advanced user can turn on reasoning,
+usage accounting, raw provider responses, graph export, and frontend streaming
+without changing the shape of their business code.
+
+Zonix has a few deliberately personal design choices:
+
+- Simple first: `await agent(task)` is the happy path.
+- Chainable when needed: reasoning, thinking budgets, output limits, and
+  provider quirks are small method calls instead of scattered dictionaries.
+- Inspectable by default: `.run()` keeps trace, usage, model calls, messages,
+  raw upstream payloads, and checkpoint state together.
+- Flow should be visible: workflow and team graphs can be exported as Mermaid,
+  DOT, SVG, PNG, or PDF.
 
 The core idea:
 
@@ -17,8 +34,9 @@ async for event in planner.stream("add captcha to the login page", ctx=ctx):
 ```
 
 `__call__` returns the structured output. `.run()` returns the full trace, usage,
-messages, and checkpoint metadata. `.stream()` returns typed events that can be
-mapped to frontend protocols such as the Vercel AI SDK data stream.
+messages, model calls, raw upstream responses, and checkpoint metadata.
+`.stream()` returns typed events that can be mapped to frontend protocols such
+as the Vercel AI SDK data stream.
 
 ## Install
 
@@ -37,6 +55,8 @@ Optional model providers:
 ```bash
 pip install "zonix[openai]"
 pip install "zonix[anthropic]"
+pip install "zonix[gemini]"
+pip install "zonix[viz]"
 ```
 
 ## OpenAI-compatible and Anthropic-compatible endpoints
@@ -61,6 +81,50 @@ anthropic_model = Anthropic(
     base_url=os.environ["ZONIX_BASE_URL"],
 )
 ```
+
+For OpenAI-compatible providers such as DeepSeek, keep the same adapter and only
+change the endpoint and model:
+
+```python
+deepseek_model = OpenAI(
+    model="deepseek-v4-flash",
+    api_key=os.environ["DEEPSEEK_API_KEY"],
+    base_url="https://api.deepseek.com/v1",
+)
+```
+
+Newer model-specific controls stay chainable, so the common path remains
+readable:
+
+```python
+from zonix.models import Anthropic, Gemini, OpenAI
+
+planner_model = (
+    OpenAI("gpt-5.5")
+    .responses()
+    .reasoning("low", summary="auto")
+    .verbosity("low")
+    .max_output(8000)
+)
+
+claude_model = (
+    Anthropic("claude-sonnet-4-6")
+    .thinking("adaptive")
+    .effort("medium")
+    .max_output(16000)
+)
+
+gemini_model = (
+    Gemini("gemini-3-pro")
+    .thinking_budget(4096)
+    .include_thoughts()
+    .max_output(8000)
+)
+```
+
+OpenAI's Responses API is opt-in with `.responses()` so existing
+OpenAI-compatible gateways that only implement Chat Completions can keep using
+the default adapter path.
 
 Run the real provider example:
 
@@ -91,7 +155,7 @@ planner = (
     agent(
         "planner",
         role="Plan code work",
-        model=OpenAI("gpt-5.2", temperature=0.2),
+        model=OpenAI("gpt-5.5", temperature=0.2).responses().reasoning("low"),
         output=Plan,
     )
     .use(read_tree, search_code)
@@ -143,6 +207,21 @@ async for event in planner.stream(task, ctx=ctx):
 All three calls use the same run engine. The engine owns prompt assembly, model
 calls, tool execution, output validation, usage aggregation, spans, checkpoints,
 and event emission.
+
+`.run()` is the inspection layer:
+
+```python
+run = await planner.run(task, ctx=ctx)
+
+print(run.output)
+print(run.usage.reasoning_tokens)
+print(run.model_calls[-1].raw_request)
+print(run.model_calls[-1].raw_response)
+```
+
+That raw-response escape hatch is intentional. Zonix keeps the beginner API
+small, but it should never hide the provider payload when you need to debug a
+token spike, a refusal, a tool-call mismatch, or a gateway quirk.
 
 ## Manual message history
 
@@ -208,6 +287,14 @@ flow = (
 )
 ```
 
+Workflow graphs can be exported for review or documentation:
+
+```python
+flow.graph().save("review.mmd")
+flow.graph().save("review.png")  # requires zonix[viz] and Graphviz
+print(flow.to_mermaid())
+```
+
 ## Team and router
 
 ```python
@@ -233,6 +320,12 @@ answer = await code_team.solve("review the auth changes", ctx=ctx)
 
 A router can be a rule function, another agent, or any node that returns
 `Route(next=..., done=..., input=...)`.
+
+Teams expose the same graph API:
+
+```python
+code_team.graph().save("code_team.svg")
+```
 
 ## Memory
 
@@ -298,6 +391,7 @@ zonix/
   spec.py       agent()/team()/workflow()/router() factories
   engine.py     serializable Run engine and Agent execution
   runtime.py    __call__/run/stream driver shared by every node
+  graph.py      workflow/team graph specs, Mermaid, DOT, and image export
   memory/       Window, Summarize, Vector, Session
   multi/        Workflow, Team, Router nodes
   hitl.py       checkpoint save/load and approval keys

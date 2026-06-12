@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+- Added model call inspection on `RunResult`, including raw upstream requests,
+  raw upstream responses, provider status, finish reasons, and per-call usage.
+- Expanded usage accounting with cached, cache creation, cache read, reasoning,
+  and thinking token fields.
+- Added chainable OpenAI Responses API controls for reasoning effort, reasoning
+  summaries, verbosity, output limits, previous responses, and includes.
+- Added Anthropic thinking, adaptive effort, service tier, metadata, native
+  thinking stream handling, and richer usage details.
+- Added a Gemini adapter with thinking budget, thought summaries, JSON output,
+  safety settings, tool config, and cached-content controls.
+- Added workflow and team graph exports as Mermaid, DOT, SVG, PNG, or PDF.
+- Updated documentation around Zonix's simple-first, chainable, traceable
+  design style and OpenAI-compatible providers such as DeepSeek.
+
 ## 0.2.2
 
 - Added first-class manually supplied `message_history` for agents, workflows,

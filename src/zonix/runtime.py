@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from typing import Any, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 from .events import ErrorEvent, Finish, NodeEnd, NodeStart
 from .exceptions import RunPaused
@@ -41,6 +41,7 @@ async def run_node(
         bus=bus,
         session=session,
         message_history=coerce_messages(message_history),
+        model_calls=[],
         approvals=approvals or {},
         extra=extra,
         run_id=run_id or trace.attributes.get("run_id") or "",
@@ -99,6 +100,7 @@ async def run_node(
         usage=state.usage,
         trace=trace,
         messages=list(state.messages),
+        model_calls=list(state.model_calls),
         scratch=dict(state.scratch),
         status=status,
         pending=pending,

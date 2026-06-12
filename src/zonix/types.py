@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from collections.abc import Sequence
-from typing import Any, Awaitable, Callable, Literal, Protocol, TypeAlias, TypeVar
+from typing import Any, Literal, Protocol, TypeAlias, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 T = TypeVar("T")
 Emit = Callable[[Any], Awaitable[None]]
@@ -18,8 +17,14 @@ class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    reasoning_tokens: int = 0
+    thinking_tokens: int = 0
     model_calls: int = 0
     tool_calls: int = 0
+    provider_details: dict[str, Any] = Field(default_factory=dict)
 
     def add(self, other: Usage | None) -> Usage:
         if other is None:
@@ -27,12 +32,36 @@ class Usage(BaseModel):
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.total_tokens += other.total_tokens
+        self.cached_input_tokens += other.cached_input_tokens
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens
+        self.cache_read_input_tokens += other.cache_read_input_tokens
+        self.reasoning_tokens += other.reasoning_tokens
+        self.thinking_tokens += other.thinking_tokens
         self.model_calls += other.model_calls
         self.tool_calls += other.tool_calls
+        self.provider_details = _merge_provider_details(
+            self.provider_details,
+            other.provider_details,
+        )
         return self
 
     def __iadd__(self, other: Usage | None) -> Usage:
         return self.add(other)
+
+
+def _merge_provider_details(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    for key, value in right.items():
+        current = merged.get(key)
+        if isinstance(current, int | float) and isinstance(value, int | float):
+            merged[key] = current + value
+        elif isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_provider_details(current, value)
+        elif key not in merged:
+            merged[key] = value
+        else:
+            merged[key] = value
+    return merged
 
 
 class Message(BaseModel):
@@ -90,7 +119,11 @@ def tool_message(
         role="tool",
         name=tool,
         tool_call_id=call_id,
-        content=content if content is not None else json.dumps(to_jsonable(output), ensure_ascii=False),
+        content=(
+            content
+            if content is not None
+            else json.dumps(to_jsonable(output), ensure_ascii=False)
+        ),
     )
 
 
@@ -154,9 +187,12 @@ class RunState:
     bus: Any
     session: Any = None
     message_history: list[Message] = field(default_factory=list)
+    model_calls: list[ModelCall] = field(default_factory=list)
     approvals: dict[str, Any] = field(default_factory=dict)
     extra: str | None = None
     run_id: str = field(default_factory=lambda: f"run_{uuid.uuid4().hex}")
+    stop_requested: bool = False
+    stop_output: Any = None
 
     @property
     def path(self) -> tuple[str, ...]:
@@ -164,6 +200,10 @@ class RunState:
 
     def scoped(self, name: str, **attributes: Any) -> RunState:
         return replace(self, messages=[], trace=self.trace.child(name, **attributes))
+
+    def request_stop(self, output: Any = None) -> None:
+        self.stop_requested = True
+        self.stop_output = output
 
 
 class Node(Protocol):
@@ -175,6 +215,21 @@ class Node(Protocol):
         ...
 
 
+class ModelCall(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    provider: str | None = None
+    model: str | None = None
+    request: dict[str, Any] = Field(default_factory=dict)
+    raw_request: Any = None
+    raw_response: Any = None
+    usage: Usage = Field(default_factory=Usage)
+    response_id: str | None = None
+    status: str | None = None
+    finish_reason: str | None = None
+    message_data: dict[str, Any] = Field(default_factory=dict)
+
+
 @dataclass
 class RunResult:
     run_id: str
@@ -183,6 +238,7 @@ class RunResult:
     trace: Span
     messages: list[Message]
     scratch: dict[str, Any]
+    model_calls: list[ModelCall] = field(default_factory=list)
     status: Literal["done", "paused", "error"] = "done"
     pending: PendingApproval | None = None
     error: str | None = None
@@ -191,6 +247,15 @@ class RunResult:
     @property
     def paused(self) -> bool:
         return self.status == "paused"
+
+    @property
+    def last_model_call(self) -> ModelCall | None:
+        return self.model_calls[-1] if self.model_calls else None
+
+    @property
+    def last_response(self) -> Any:
+        call = self.last_model_call
+        return None if call is None else call.raw_response
 
     def dump(self) -> dict[str, Any]:
         from .serialization import to_jsonable
@@ -202,6 +267,7 @@ class RunResult:
             "usage": to_jsonable(self.usage),
             "trace": to_jsonable(self.trace),
             "messages": to_jsonable(self.messages),
+            "model_calls": to_jsonable(self.model_calls),
             "scratch": to_jsonable(self.scratch),
             "pending": to_jsonable(self.pending),
             "error": self.error,

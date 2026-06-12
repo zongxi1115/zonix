@@ -166,7 +166,6 @@ async def tool_call_case() -> None:
         role="Use tools before final output",
         model=tool_model,
         output=ToolSummary,
-        max_tool_rounds=2,
     ).prompt(
         "Call inspect_project exactly once with area='login'. "
         "Use the tool result to return JSON with used_tool=true."
@@ -222,7 +221,6 @@ async def approval_resume_case() -> None:
         role="Propose one file mutation, then summarize it",
         model=approval_model,
         output=PatchResult,
-        max_tool_rounds=2,
     ).prompt(
         "Call propose_file_write exactly once with path='login.py' and content='captcha hook'. "
         "After the tool succeeds, return JSON with applied=true."
@@ -268,7 +266,6 @@ async def retry_and_timeout_case() -> None:
             role="Retry a transient tool failure",
             model=retry_model,
             output=ToolSummary,
-            max_tool_rounds=2,
         )
         .prompt(
             "Call unstable_lookup exactly once with query='login'. "

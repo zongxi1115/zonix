@@ -22,10 +22,6 @@ class OutputValidationError(ZonixError):
     """Raised when a model response cannot be validated as the requested output."""
 
 
-class MaxToolRoundsExceeded(ZonixError):
-    """Raised when an agent keeps asking for tools beyond its configured limit."""
-
-
 class MaxStepsExceeded(ZonixError):
     """Raised when a team router exceeds its step budget."""
 

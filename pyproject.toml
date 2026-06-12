@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zonix"
-version = "0.2.2"
+version = "0.3.0"
 description = "Explicit, serializable AI workflow primitives inspired by pydantic-ai."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,6 +27,8 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.68"]
 anthropic = ["anthropic>=0.45"]
+gemini = ["google-genai>=1.0"]
+viz = ["graphviz>=0.20"]
 dev = ["ruff>=0.8", "mypy>=1.13"]
 
 [project.urls]

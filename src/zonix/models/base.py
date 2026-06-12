@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from zonix.events import TextDelta, TextEnd, TextStart, ToolInputAvailable, ToolInputStart
 from zonix.types import Message, ToolCall, Usage
 
-
 OUTPUT_TOOL_NAME = "zonix_final_output"
 
 
@@ -30,6 +29,9 @@ class ModelRequest(BaseModel):
     output_schema: dict[str, Any] | None = None
     output_name: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    ctx: Any = None
+    state: Any = None
+    task: Any = None
 
 
 class ModelResponse(BaseModel):
@@ -39,7 +41,15 @@ class ModelResponse(BaseModel):
     output: Any = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
+    message_data: dict[str, Any] = Field(default_factory=dict)
+    provider: str | None = None
+    model: str | None = None
+    request_data: dict[str, Any] = Field(default_factory=dict)
+    raw_request: Any = None
     raw: Any = None
+    response_id: str | None = None
+    status: str | None = None
+    finish_reason: str | None = None
 
 
 class SupportsEmit(Protocol):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any, Callable, Generic, TypeVar
+from collections.abc import AsyncIterator, Callable
+from typing import Any, Generic, TypeVar
 
 from .engine import RunEngine
 from .models import BaseChatModel, Echo
@@ -10,7 +10,6 @@ from .multi.workflow import WorkflowBuilder
 from .runtime import run_node, stream_node
 from .tools import ToolDefinition
 from .types import MessageLike, RunResult, RunState
-
 
 OutT = TypeVar("OutT")
 
@@ -25,7 +24,6 @@ class Agent(Generic[OutT]):
         deps: type[Any] | None = None,
         output: type[OutT] | Any = None,
         memory: Any = None,
-        max_tool_rounds: int = 4,
     ) -> None:
         self.name = name
         self.role = role
@@ -35,7 +33,6 @@ class Agent(Generic[OutT]):
         self.in_type: type[Any] = str
         self.out_type: type[Any] = output if isinstance(output, type) else Any
         self.memory = memory
-        self.max_tool_rounds = max_tool_rounds
         self.tools: list[ToolDefinition] = []
         self.prompts: list[str | Callable[..., Any]] = []
         self.retry_attempts = 0
@@ -48,9 +45,17 @@ class Agent(Generic[OutT]):
         self.prompts.append(value)
         return self
 
-    def use(self, *funcs: Callable[..., Any]) -> Agent[OutT]:
-        for func in funcs:
-            self.tools.append(ToolDefinition.from_func(func))
+    def use(self, *tools: Callable[..., Any] | ToolDefinition) -> Agent[OutT]:
+        for tool in tools:
+            if isinstance(tool, ToolDefinition):
+                self.tools.append(tool)
+                continue
+            self.tools.append(
+                ToolDefinition.from_func(
+                    tool,
+                    supports_parallel=bool(getattr(tool, "supports_parallel", False)),
+                )
+            )
         return self
 
     def tool(
@@ -59,9 +64,19 @@ class Agent(Generic[OutT]):
         *,
         name: str | None = None,
         approval: bool = False,
+        supports_parallel: bool = False,
+        catch_errors: bool = False,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]] | Callable[..., Any]:
         def decorator(inner: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(ToolDefinition.from_func(inner, name=name, approval=approval))
+            self.tools.append(
+                ToolDefinition.from_func(
+                    inner,
+                    name=name,
+                    approval=approval,
+                    supports_parallel=supports_parallel,
+                    catch_errors=catch_errors,
+                )
+            )
             return inner
 
         if func is None:
@@ -169,7 +184,6 @@ def agent(
     deps: type[Any] | None = None,
     output: type[OutT] | Any = None,
     memory: Any = None,
-    max_tool_rounds: int = 4,
 ) -> Agent[OutT]:
     return Agent(
         name,
@@ -178,7 +192,6 @@ def agent(
         deps=deps,
         output=output,
         memory=memory,
-        max_tool_rounds=max_tool_rounds,
     )
 
 

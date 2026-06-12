@@ -9,6 +9,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from .events import (
     ApprovalRequired,
+    ReasoningDelta,
     TextDelta,
     TextEnd,
     TextStart,
@@ -17,7 +18,6 @@ from .events import (
     ToolOutputAvailable,
 )
 from .exceptions import (
-    MaxToolRoundsExceeded,
     OutputValidationError,
     RunPaused,
     ToolApprovalRejected,
@@ -26,7 +26,7 @@ from .hitl import approval_key, pending_from_call
 from .models import ModelRequest, ModelResponse
 from .serialization import to_jsonable
 from .tools import ToolContext, ToolDefinition
-from .types import Message, RunState, ToolCall
+from .types import Message, ModelCall, RunState, ToolCall
 
 
 class RunEngine:
@@ -50,7 +50,10 @@ class RunEngine:
                 if attempt + 1 >= attempts:
                     break
         if self.agent.fallback_node is not None:
-            return await self.agent.fallback_node.invoke(task, st.scoped(self.agent.fallback_node.name))
+            return await self.agent.fallback_node.invoke(
+                task,
+                st.scoped(self.agent.fallback_node.name),
+            )
         if last_error is not None:
             raise last_error
         raise RuntimeError("Agent invocation failed without an exception.")
@@ -58,39 +61,48 @@ class RunEngine:
     async def _invoke_once(self, task: Any, st: RunState) -> Any:
         messages = await self._build_messages(task, st)
         tools = {tool.name: tool for tool in self.agent.tools}
-        tool_rounds = 0
         repair_rounds = 0
 
-        while tool_rounds <= self.agent.max_tool_rounds:
+        while True:
             request = ModelRequest(
                 messages=messages,
                 tools=[tool.model_tool_schema() for tool in tools.values()],
                 output_schema=self._output_schema(),
                 output_name=self._output_name(),
                 metadata={"agent": self.agent.name, "role": self.agent.role},
+                ctx=st.ctx,
+                state=st,
+                task=task,
             )
             response = await self._call_model(request, st)
             st.usage += response.usage
 
             if response.tool_calls:
+                message_data = dict(response.message_data)
+                message_data["tool_calls"] = [
+                    call.model_dump(mode="json") for call in response.tool_calls
+                ]
                 messages.append(
                     Message(
                         role="assistant",
                         content=response.text,
-                        data={
-                            "tool_calls": [
-                                call.model_dump(mode="json") for call in response.tool_calls
-                            ]
-                        },
+                        data=message_data,
                     )
                 )
-                tool_rounds += 1
-                for call in response.tool_calls:
-                    await self._run_tool(call, tools, messages, st)
+                await self._run_tool_calls(response.tool_calls, tools, messages, st)
+                if st.stop_requested:
+                    st.messages = messages
+                    return st.stop_output
                 continue
 
             if response.text:
-                messages.append(Message(role="assistant", content=response.text))
+                messages.append(
+                    Message(
+                        role="assistant",
+                        content=response.text,
+                        data=dict(response.message_data),
+                    )
+                )
 
             try:
                 output = self._validate_output(response)
@@ -115,9 +127,40 @@ class RunEngine:
             await self._remember(task, output, st)
             return output
 
-        raise MaxToolRoundsExceeded(
-            f"Agent {self.agent.name!r} exceeded {self.agent.max_tool_rounds} tool rounds."
-        )
+    async def _run_tool_calls(
+        self,
+        calls: list[ToolCall],
+        tools: dict[str, ToolDefinition],
+        messages: list[Message],
+        st: RunState,
+    ) -> None:
+        parallel_buffer: list[ToolCall] = []
+
+        async def flush_parallel_buffer() -> None:
+            nonlocal parallel_buffer
+            if not parallel_buffer:
+                return
+            if len(parallel_buffer) == 1:
+                await self._run_tool(parallel_buffer[0], tools, messages, st)
+            else:
+                await asyncio.gather(
+                    *[
+                        self._run_tool(call, tools, messages, st)
+                        for call in parallel_buffer
+                    ]
+                )
+            parallel_buffer = []
+
+        for call in calls:
+            tool = tools.get(call.tool)
+            if tool is not None and bool(getattr(tool, "supports_parallel", False)):
+                parallel_buffer.append(call)
+                continue
+
+            await flush_parallel_buffer()
+            await self._run_tool(call, tools, messages, st)
+
+        await flush_parallel_buffer()
 
     async def _build_messages(self, task: Any, st: RunState) -> list[Message]:
         messages: list[Message] = []
@@ -167,12 +210,60 @@ class RunEngine:
 
     async def _call_model(self, request: ModelRequest, st: RunState) -> ModelResponse:
         if st.bus._emit is not None:
-            return await self.agent.model.stream_complete(request, st.bus.publish, st.path)
-        response = await self.agent.model.complete(request)
-        await self._emit_response(response, st)
+            response = await self.agent.model.stream_complete(request, st.bus.publish, st.path)
+        else:
+            response = await self.agent.model.complete(request)
+            await self._emit_response(response, st)
+        self._record_model_call(request, response, st)
         return response
 
+    def _record_model_call(
+        self,
+        request: ModelRequest,
+        response: ModelResponse,
+        st: RunState,
+    ) -> None:
+        request_data = response.request_data or {
+            "messages": [message.model_dump(mode="json") for message in request.messages],
+            "tools": to_jsonable(request.tools),
+            "output_schema": to_jsonable(request.output_schema),
+            "output_name": request.output_name,
+            "metadata": to_jsonable(request.metadata),
+        }
+        call = ModelCall(
+            provider=response.provider or getattr(self.agent.model, "name", "").split(":", 1)[0],
+            model=response.model or getattr(self.agent.model, "name", None),
+            request=request_data,
+            raw_request=response.raw_request or request_data,
+            raw_response=response.raw,
+            usage=response.usage,
+            response_id=response.response_id,
+            status=response.status,
+            finish_reason=response.finish_reason,
+            message_data=dict(response.message_data),
+        )
+        st.model_calls.append(call)
+        st.trace.record(
+            {
+                "kind": "model_call",
+                "provider": call.provider,
+                "model": call.model,
+                "response_id": call.response_id,
+                "status": call.status,
+                "finish_reason": call.finish_reason,
+                "usage": to_jsonable(call.usage),
+            }
+        )
+
     async def _emit_response(self, response: ModelResponse, st: RunState) -> None:
+        reasoning = response.message_data.get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            await st.bus.publish(ReasoningDelta(st.path, "reasoning_0", reasoning))
+        elif isinstance(reasoning, list):
+            for index, item in enumerate(reasoning):
+                text = item.get("text") if isinstance(item, dict) else str(item)
+                if text:
+                    await st.bus.publish(ReasoningDelta(st.path, f"reasoning_{index}", text))
         if response.text:
             await st.bus.publish(TextStart(st.path, "text_0"))
             await st.bus.publish(TextDelta(st.path, "text_0", response.text))
@@ -198,7 +289,13 @@ class RunEngine:
         if approved_input is not None and isinstance(approved_input, dict):
             parsed_input = tool.parse_input(approved_input)
 
-        ctx = ToolContext(deps=st.ctx, usage=st.usage, state=st, agent=self.agent)
+        ctx = ToolContext(
+            deps=st.ctx,
+            usage=st.usage,
+            state=st,
+            agent=self.agent,
+            call=normalized_call,
+        )
         output = await tool.invoke(ctx, parsed_input)
         st.usage.tool_calls += 1
         await st.bus.publish(ToolOutputAvailable(st.path, call.call_id, to_jsonable(output)))
@@ -278,7 +375,8 @@ class RunEngine:
             return TypeAdapter(output_type).validate_python(data)
         except Exception as exc:
             raise OutputValidationError(
-                f"Agent {self.agent.name!r} could not validate model output as {self._output_name()}."
+                "Agent "
+                f"{self.agent.name!r} could not validate model output as {self._output_name()}."
             ) from exc
 
     async def _remember(self, task: Any, output: Any, st: RunState) -> None:

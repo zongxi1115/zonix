@@ -77,7 +77,11 @@ def event_to_part(event: Event) -> dict[str, Any] | None:
     return None
 
 
-async def to_ai_sdk(stream: AsyncIterator[Event], *, message_id: str | None = None) -> AsyncIterator[str]:
+async def to_ai_sdk(
+    stream: AsyncIterator[Event],
+    *,
+    message_id: str | None = None,
+) -> AsyncIterator[str]:
     yield sse({"type": "start", "messageId": message_id or f"msg_{uuid.uuid4().hex}"})
     async for event in stream:
         part = event_to_part(event)

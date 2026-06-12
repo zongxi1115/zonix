@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from zonix.exceptions import MaxStepsExceeded
+from zonix.graph import GraphEdge, GraphNode, GraphSpec, safe_graph_id
 from zonix.runtime import run_node, stream_node
 from zonix.types import MessageLike, Node, Route, RunResult, RunState
 
@@ -59,7 +60,10 @@ class TeamNode:
             if route.next not in self.agents:
                 raise KeyError(f"Router selected unknown node {route.next!r}.")
             node = self.agents[route.next]
-            current = await node.invoke(route.input if route.input is not None else current, st.scoped(node.name))
+            current = await node.invoke(
+                route.input if route.input is not None else current,
+                st.scoped(node.name),
+            )
             st.scratch[node.name] = current
         raise MaxStepsExceeded(f"Team {self.name!r} exceeded {self.max_steps} steps.")
 
@@ -95,6 +99,30 @@ class TeamNode:
         message_history: list[MessageLike] | None = None,
     ) -> AsyncIterator[Any]:
         return stream_node(self, task, ctx=ctx, session=session, message_history=message_history)
+
+    def graph(self) -> GraphSpec:
+        router_id = safe_graph_id(f"router_{self.router.name}")
+        nodes: list[GraphNode] = [
+            GraphNode("start", "start", "start"),
+            GraphNode(router_id, self.router.name, "router"),
+            GraphNode("done", "done", "end"),
+        ]
+        edges: list[GraphEdge] = [
+            GraphEdge("start", router_id),
+            GraphEdge(router_id, "done", "done"),
+        ]
+        for node in self.agents.values():
+            node_id = safe_graph_id(f"agent_{node.name}")
+            nodes.append(GraphNode(node_id, node.name, "agent"))
+            edges.append(GraphEdge(router_id, node_id, f"next={node.name}"))
+            edges.append(GraphEdge(node_id, router_id, "route again"))
+        return GraphSpec(self.name, nodes, edges)
+
+    def to_mermaid(self) -> str:
+        return self.graph().mermaid()
+
+    def save_graph(self, path: str) -> Any:
+        return self.graph().save(path)
 
 
 class TeamBuilder:

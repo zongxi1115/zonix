@@ -12,9 +12,11 @@ from .events import (
     ToolInputStart,
     ToolOutputAvailable,
 )
+from .graph import GraphEdge, GraphNode, GraphSpec
 from .spec import Agent, agent, router, team, workflow
 from .types import (
     Message,
+    ModelCall,
     PendingApproval,
     Route,
     RunResult,
@@ -36,7 +38,11 @@ __all__ = [
     "ErrorEvent",
     "Event",
     "Finish",
+    "GraphEdge",
+    "GraphNode",
+    "GraphSpec",
     "Message",
+    "ModelCall",
     "PendingApproval",
     "ReasoningDelta",
     "Route",

@@ -51,7 +51,21 @@ async for event in planner.stream(task):
     ...
 ```
 
-`planner(task)` 只拿结构化结果，`.run()` 拿完整 trace/usage/messages/scratch，`.stream()` 拿类型化事件流。
+`planner(task)` 只拿结构化结果，`.run()` 拿完整 trace/usage/messages/model_calls/scratch，`.stream()` 拿类型化事件流。
+
+`.run()` 是定位问题时打开的那一层：
+
+```python
+run = await planner.run(task)
+
+print(run.output)
+print(run.usage.reasoning_tokens)
+print(run.model_calls[-1].raw_request)
+print(run.model_calls[-1].raw_response)
+```
+
+Zonix 的口味是：默认调用要简单，但不能把上游藏起来。token、reasoning、tool call、
+refusal、网关兼容问题，都应该能顺着 `model_calls` 查到源头。
 
 ## 第 2 章：连接真实模型 Provider
 
@@ -78,6 +92,38 @@ model = Anthropic(
     temperature=0.0,
 )
 ```
+
+新模型参数不要变成一坨难记的字典。Zonix 推荐把常用能力做成链式“小旋钮”：
+
+```python
+from zonix.models import Anthropic, Gemini, OpenAI
+
+openai_model = (
+    OpenAI("gpt-5.5")
+    .responses()
+    .reasoning("low", summary="auto")
+    .verbosity("low")
+    .max_output(8000)
+)
+
+claude_model = (
+    Anthropic("claude-sonnet-4-6")
+    .thinking("adaptive")
+    .effort("medium")
+    .max_output(16000)
+)
+
+gemini_model = (
+    Gemini("gemini-3-pro")
+    .thinking_budget(4096)
+    .include_thoughts()
+    .max_output(8000)
+)
+```
+
+小白可以只写 `OpenAI("gpt-5.5")`。熟手再逐个打开 reasoning、verbosity、
+thinking budget、max output。业务代码仍然是一眼能懂的对象组合，而不是 provider
+参数文档的复制粘贴。
 
 不要把 API key、内部网关地址、测试模型名写进仓库。Zonix 的示例全部通过环境变量读取。
 
@@ -227,6 +273,20 @@ async for event in planner.stream(task):
         print(event.tool, event.input)
 ```
 
+Reasoning/thinking 也走事件：
+
+```python
+from zonix import ReasoningDelta
+
+async for event in planner.stream(task):
+    if isinstance(event, ReasoningDelta):
+        print(event.delta)
+```
+
+OpenAI Responses 的 reasoning summary、Anthropic 的 thinking_delta、Gemini 的 thought
+summary 会尽量映射到这类事件。原始 provider payload 仍然保存在 `.run()` 的
+`model_calls` 里。
+
 映射到 Vercel AI SDK Data Stream：
 
 ```python
@@ -275,6 +335,17 @@ flow = (
 
 每个节点都会进入 trace，`ctx/usage/bus` 自动透传，`messages` 默认按节点隔离。
 
+如果要把流程给人看，可以直接导出图：
+
+```python
+flow.graph().save("code_flow.mmd")
+flow.graph().save("code_flow.png")  # 需要安装 zonix[viz] 和系统 Graphviz
+print(flow.to_mermaid())
+```
+
+这里的图不是装饰品，而是定位工具：复杂 workflow 到底怎么分叉、并发、循环，
+应该能导出来贴到文档或 issue 里。
+
 ## 第 8 章：Team 和 Router 动态调度
 
 team 适合运行时动态选择下一个 Agent：
@@ -301,6 +372,12 @@ answer = await code_team.solve("review auth changes")
 ```
 
 router 可以是规则函数，也可以是另一个 Agent。契约固定为返回 `Route(next=..., done=..., input=...)`。
+
+team 也能导出调度图：
+
+```python
+code_team.graph().save("code_team.svg")
+```
 
 ## 第 9 章：Session 和记忆
 

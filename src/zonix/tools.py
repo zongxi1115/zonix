@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, create_model
 
@@ -17,6 +18,16 @@ class ToolContext:
     usage: Usage
     state: RunState
     agent: Any
+    call: Any | None = None
+
+    @property
+    def workspace(self) -> Any:
+        return getattr(self.deps, "workspace", None)
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        value = getattr(self.deps, "metadata", None)
+        return value if isinstance(value, dict) else {}
 
 
 def _is_context_param(name: str, annotation: Any) -> bool:
@@ -31,8 +42,11 @@ class ToolDefinition:
     func: Callable[..., Any]
     description: str
     input_model: type[BaseModel]
+    schema: dict[str, Any] | None = None
     approval: bool = False
     pass_context: bool = False
+    supports_parallel: bool = False
+    catch_errors: bool = False
 
     @classmethod
     def from_func(
@@ -41,6 +55,8 @@ class ToolDefinition:
         *,
         name: str | None = None,
         approval: bool = False,
+        supports_parallel: bool = False,
+        catch_errors: bool = False,
     ) -> ToolDefinition:
         signature = inspect.signature(func)
         fields: dict[str, tuple[Any, Any]] = {}
@@ -69,9 +85,42 @@ class ToolDefinition:
             input_model=input_model,
             approval=approval,
             pass_context=pass_context,
+            supports_parallel=supports_parallel,
+            catch_errors=catch_errors,
+        )
+
+    @classmethod
+    def from_schema_runner(
+        cls,
+        *,
+        name: str,
+        description: str,
+        schema: dict[str, Any] | None,
+        runner: Callable[[ToolContext, dict[str, Any]], Any],
+        supports_parallel: bool = False,
+        catch_errors: bool = False,
+    ) -> ToolDefinition:
+        def invoke_schema_runner(ctx: ToolContext, **kwargs: Any) -> Any:
+            return runner(ctx, kwargs)
+
+        input_model = create_model(
+            f"{name.title().replace('_', '')}Input",
+            __config__=ConfigDict(arbitrary_types_allowed=True, extra="allow"),
+        )
+        return cls(
+            name=name,
+            func=invoke_schema_runner,
+            description=description,
+            input_model=input_model,
+            schema=schema,
+            pass_context=True,
+            supports_parallel=supports_parallel,
+            catch_errors=catch_errors,
         )
 
     def input_schema(self) -> dict[str, Any]:
+        if self.schema is not None:
+            return self.schema
         return self.input_model.model_json_schema()
 
     def model_tool_schema(self) -> dict[str, Any]:
@@ -85,6 +134,8 @@ class ToolDefinition:
         }
 
     def parse_input(self, data: dict[str, Any]) -> dict[str, Any]:
+        if self.schema is not None:
+            return data if isinstance(data, dict) else {}
         return self.input_model.model_validate(data).model_dump(mode="python")
 
     async def invoke(self, ctx: ToolContext, data: dict[str, Any]) -> Any:
@@ -98,6 +149,12 @@ class ToolDefinition:
                 value = await value
             return value
         except Exception as exc:  # pragma: no cover - wrapper preserves original cause
+            if self.catch_errors:
+                return {
+                    "success": False,
+                    "error_message": str(exc),
+                    "error_type": type(exc).__name__,
+                }
             raise ToolError(f"Tool {self.name!r} failed: {exc}") from exc
 
     def dump(self) -> dict[str, Any]:
