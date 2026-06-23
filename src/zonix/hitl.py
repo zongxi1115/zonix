@@ -16,12 +16,21 @@ def approval_key(tool: str, input: dict[str, Any]) -> str:
     return f"{tool}:{digest}"
 
 
-def pending_from_call(call: ToolCall) -> PendingApproval:
+def pending_from_call(
+    call: ToolCall,
+    *,
+    action: str = "require_approval",
+    reason: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> PendingApproval:
     return PendingApproval(
         call_id=call.call_id,
         tool=call.tool,
         input=call.input,
         approval_key=approval_key(call.tool, call.input),
+        action=action,
+        reason=reason,
+        metadata=metadata or {},
     )
 
 

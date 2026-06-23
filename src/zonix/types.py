@@ -64,9 +64,13 @@ def _merge_provider_details(left: dict[str, Any], right: dict[str, Any]) -> dict
     return merged
 
 
+MessageContentBlock: TypeAlias = dict[str, Any]
+MessageContent: TypeAlias = str | list[MessageContentBlock]
+
+
 class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | None = None
+    content: MessageContent | None = None
     name: str | None = None
     tool_call_id: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)
@@ -81,21 +85,21 @@ class ToolCall(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
 
 
-def system_message(content: str, **data: Any) -> Message:
+def system_message(content: MessageContent, **data: Any) -> Message:
     return Message(role="system", content=content, data=data)
 
 
-def user_message(content: str, **data: Any) -> Message:
+def user_message(content: MessageContent, **data: Any) -> Message:
     return Message(role="user", content=content, data=data)
 
 
-def assistant_message(content: str | None = None, **data: Any) -> Message:
+def assistant_message(content: MessageContent | None = None, **data: Any) -> Message:
     return Message(role="assistant", content=content, data=data)
 
 
 def assistant_tool_call_message(
     *tool_calls: ToolCall | dict[str, Any],
-    content: str | None = None,
+    content: MessageContent | None = None,
 ) -> Message:
     calls = [
         call.model_dump(mode="json")
@@ -141,6 +145,16 @@ class PendingApproval(BaseModel):
     tool: str
     input: dict[str, Any]
     approval_key: str
+    action: str = "require_approval"
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+ApprovalDecision: TypeAlias = bool | dict[str, Any]
+ApprovalHandler: TypeAlias = Callable[
+    [PendingApproval],
+    ApprovalDecision | Awaitable[ApprovalDecision],
+]
 
 
 class Route(BaseModel):
@@ -283,3 +297,12 @@ class RunResult:
         if self._resume is None:
             raise RuntimeError("This run was loaded from a dump and has no live runner.")
         return await self._resume(approve, input)
+
+    def resume_sync(
+        self,
+        approve: bool = True,
+        input: dict[str, Any] | None = None,
+    ) -> RunResult:
+        from .sync import run_sync
+
+        return run_sync(lambda: self.resume(approve=approve, input=input))

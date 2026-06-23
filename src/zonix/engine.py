@@ -5,7 +5,7 @@ import inspect
 import json
 from typing import Any
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .events import (
     ApprovalRequired,
@@ -25,7 +25,17 @@ from .exceptions import (
 from .hitl import approval_key, pending_from_call
 from .models import ModelRequest, ModelResponse
 from .serialization import to_jsonable
-from .tools import ToolContext, ToolDefinition
+from .tools import (
+    ToolApprovalRequired,
+    ToolCallAllowed,
+    ToolCallDenied,
+    ToolContext,
+    ToolDefinition,
+    ToolEscalationRequired,
+    ToolMiddlewareContext,
+    ToolMiddlewareResult,
+    coerce_middleware_result,
+)
 from .types import Message, ModelCall, RunState, ToolCall
 
 
@@ -171,7 +181,7 @@ class RunEngine:
         if st.session is not None:
             history = await st.session.recall(task, st.ctx, memory=self.agent.memory)
             messages.extend(history)
-        messages.append(Message(role="user", content=str(task)))
+        messages.append(Message(role="user", content=_task_message_content(task)))
         if st.extra:
             messages.append(Message(role="user", content=st.extra, data={"kind": "extra"}))
         return messages
@@ -283,11 +293,66 @@ class RunEngine:
             raise KeyError(f"Agent {self.agent.name!r} has no tool named {call.tool!r}.")
 
         tool = tools[call.tool]
-        parsed_input = tool.parse_input(call.input)
+        parsed_input = self._parse_tool_input(tool, call.input)
+        if parsed_input is None:
+            await self._record_tool_output(
+                call=call,
+                tool_name=tool.name,
+                output=self._tool_input_validation_output(tool, call.input),
+                messages=messages,
+                st=st,
+            )
+            return
+
         normalized_call = ToolCall(call_id=call.call_id, tool=call.tool, input=parsed_input)
-        approved_input = await self._approval_for(tool, normalized_call, st)
+        middleware_result = await self._middleware_for(tool, normalized_call, parsed_input, st)
+        if getattr(middleware_result, "input", None) is not None:
+            parsed_input = self._parse_tool_input(tool, middleware_result.input)
+            if parsed_input is None:
+                await self._record_tool_output(
+                    call=call,
+                    tool_name=tool.name,
+                    output=self._tool_input_validation_output(tool, middleware_result.input),
+                    messages=messages,
+                    st=st,
+                )
+                return
+            normalized_call = ToolCall(call_id=call.call_id, tool=call.tool, input=parsed_input)
+
+        if isinstance(middleware_result, ToolCallDenied):
+            await self._record_tool_output(
+                call=call,
+                tool_name=tool.name,
+                output=middleware_result.output
+                if middleware_result.output is not None
+                else {
+                    "success": False,
+                    "error_type": "ToolCallDenied",
+                    "error_message": middleware_result.reason or f"Tool {tool.name!r} was denied.",
+                    "metadata": to_jsonable(middleware_result.metadata),
+                },
+                messages=messages,
+                st=st,
+            )
+            return
+
+        approved_input = await self._approval_for(
+            tool,
+            normalized_call,
+            st,
+            middleware_result=middleware_result,
+        )
         if approved_input is not None and isinstance(approved_input, dict):
-            parsed_input = tool.parse_input(approved_input)
+            parsed_input = self._parse_tool_input(tool, approved_input)
+            if parsed_input is None:
+                await self._record_tool_output(
+                    call=call,
+                    tool_name=tool.name,
+                    output=self._tool_input_validation_output(tool, approved_input),
+                    messages=messages,
+                    st=st,
+                )
+                return
 
         ctx = ToolContext(
             deps=st.ctx,
@@ -297,24 +362,175 @@ class RunEngine:
             call=normalized_call,
         )
         output = await tool.invoke(ctx, parsed_input)
+        await self._record_tool_output(
+            call=call,
+            tool_name=tool.name,
+            output=output,
+            messages=messages,
+            st=st,
+        )
+
+    async def _middleware_for(
+        self,
+        tool: ToolDefinition,
+        call: ToolCall,
+        parsed_input: dict[str, Any],
+        st: RunState,
+    ) -> ToolMiddlewareResult:
+        middlewares = [
+            *list(getattr(self.agent, "middlewares", []) or []),
+            *([tool.middleware] if tool.middleware is not None else []),
+        ]
+        result: ToolMiddlewareResult = ToolCallAllowed()
+        if not middlewares:
+            return result
+
+        ctx = ToolMiddlewareContext(
+            deps=st.ctx,
+            usage=st.usage,
+            state=st,
+            agent=self.agent,
+            tool=tool,
+            call=call,
+            input=parsed_input,
+        )
+        for middleware in middlewares:
+            value = middleware(ctx)
+            if inspect.isawaitable(value):
+                value = await value
+            current = coerce_middleware_result(value)
+            current_input = getattr(current, "input", None)
+            if current_input is not None:
+                ctx.input = current_input
+                if isinstance(result, ToolCallAllowed):
+                    result.input = current_input
+            if current.reason:
+                result.reason = current.reason
+            if current.metadata:
+                result.metadata.update(current.metadata)
+            if not isinstance(current, ToolCallAllowed):
+                if (
+                    isinstance(current, (ToolApprovalRequired, ToolEscalationRequired))
+                    and current.input is None
+                    and isinstance(result, ToolCallAllowed)
+                ):
+                    current.input = result.input
+                current.metadata = {**result.metadata, **current.metadata}
+                if current.reason is None:
+                    current.reason = result.reason
+                return current
+        return result
+
+    def _parse_tool_input(
+        self,
+        tool: ToolDefinition,
+        data: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        try:
+            return tool.parse_input(data)
+        except Exception:
+            if not tool.catch_errors or not bool(
+                getattr(self.agent, "recover_tool_input_errors", False)
+            ):
+                raise
+            return None
+
+    def _tool_input_validation_output(
+        self,
+        tool: ToolDefinition,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            tool.parse_input(data)
+        except Exception as exc:
+            missing_fields = self._missing_fields_from_validation_error(exc)
+            if missing_fields:
+                missing_text = ", ".join(missing_fields)
+                error_message = (
+                    f"工具 {tool.name!r} 参数校验失败：缺少必填字段 {missing_text}。"
+                    "请重新调用该工具，并提供完整且符合 schema 的参数。"
+                )
+            else:
+                error_message = (
+                    f"工具 {tool.name!r} 参数校验失败。"
+                    "请重新调用该工具，并提供完整且符合 schema 的参数。"
+                )
+            return {
+                "success": False,
+                "error_type": "ToolInputValidationError",
+                "error_message": f"{error_message} 原始错误：{exc}",
+                "validation_errors": self._validation_errors(exc),
+                "input": to_jsonable(data),
+            }
+
+        return {
+            "success": False,
+            "error_type": "ToolInputValidationError",
+            "error_message": f"工具 {tool.name!r} 参数校验失败。",
+            "input": to_jsonable(data),
+        }
+
+    def _missing_fields_from_validation_error(self, exc: Exception) -> list[str]:
+        if not isinstance(exc, ValidationError):
+            return []
+        missing_fields: list[str] = []
+        for error in exc.errors():
+            if error.get("type") != "missing":
+                continue
+            loc = error.get("loc", ())
+            if not isinstance(loc, (tuple, list)):
+                continue
+            field = ".".join(str(part) for part in loc if part is not None)
+            if field:
+                missing_fields.append(field)
+        return missing_fields
+
+    def _validation_errors(self, exc: Exception) -> list[dict[str, Any]]:
+        if not isinstance(exc, ValidationError):
+            return []
+        errors = to_jsonable(exc.errors())
+        if not isinstance(errors, list):
+            return []
+        return [error for error in errors if isinstance(error, dict)]
+
+    async def _record_tool_output(
+        self,
+        call: ToolCall,
+        tool_name: str,
+        output: Any,
+        messages: list[Message],
+        st: RunState,
+    ) -> None:
         st.usage.tool_calls += 1
         await st.bus.publish(ToolOutputAvailable(st.path, call.call_id, to_jsonable(output)))
         messages.append(
             Message(
                 role="tool",
-                name=tool.name,
+                name=tool_name,
                 tool_call_id=call.call_id,
                 content=json.dumps(to_jsonable(output), ensure_ascii=False),
             )
         )
+        for pending_message in st.scratch.pop("_pending_conversation_messages", []):
+            if isinstance(pending_message, Message):
+                messages.append(pending_message)
+            elif isinstance(pending_message, dict):
+                messages.append(Message.model_validate(pending_message))
 
     async def _approval_for(
         self,
         tool: ToolDefinition,
         call: ToolCall,
         st: RunState,
+        *,
+        middleware_result: ToolMiddlewareResult | None = None,
     ) -> dict[str, Any] | bool | None:
-        if not tool.approval:
+        middleware_result = middleware_result or ToolCallAllowed()
+        pause_result = middleware_result if isinstance(
+            middleware_result,
+            (ToolApprovalRequired, ToolEscalationRequired),
+        ) else None
+        if not tool.approval and pause_result is None:
             return None
         key = approval_key(call.tool, call.input)
         decision = st.approvals.get(call.call_id, st.approvals.get(key))
@@ -323,8 +539,45 @@ class RunEngine:
         if decision is True or isinstance(decision, dict):
             return decision
 
-        pending = pending_from_call(call)
-        await st.bus.publish(ApprovalRequired(st.path, call.call_id, call.tool, call.input))
+        action = (
+            "escalate"
+            if isinstance(pause_result, ToolEscalationRequired)
+            else "require_approval"
+        )
+        pending = pending_from_call(
+            call,
+            action=action,
+            reason=pause_result.reason if pause_result is not None else None,
+            metadata=pause_result.metadata if pause_result is not None else None,
+        )
+        await st.bus.publish(
+            ApprovalRequired(
+                st.path,
+                call.call_id,
+                call.tool,
+                call.input,
+                action,
+                pause_result.reason if pause_result is not None else None,
+                pause_result.metadata if pause_result is not None else {},
+            )
+        )
+        approver = None
+        if pause_result is not None:
+            approver = pause_result.approver
+        if approver is None:
+            approver = tool.approver
+        if approver is None:
+            approver = getattr(self.agent, "approver", None)
+        if approver is not None:
+            approved = approver(pending)
+            if inspect.isawaitable(approved):
+                approved = await approved
+            if approved is False:
+                raise ToolApprovalRejected(f"Tool call {call.call_id} was rejected.")
+            if isinstance(approved, dict):
+                return approved
+            return True
+
         snapshot = {
             "run_id": st.run_id,
             "path": st.path,
@@ -382,7 +635,7 @@ class RunEngine:
     async def _remember(self, task: Any, output: Any, st: RunState) -> None:
         if st.session is None:
             return
-        await st.session.remember(Message(role="user", content=str(task)))
+        await st.session.remember(Message(role="user", content=_task_message_content(task)))
         await st.session.remember(
             Message(role="assistant", content=json.dumps(to_jsonable(output), ensure_ascii=False))
         )
@@ -390,6 +643,14 @@ class RunEngine:
 
 def messages_dump(messages: list[Message]) -> list[dict[str, Any]]:
     return [message.model_dump(mode="json") for message in messages]
+
+
+def _task_message_content(task: Any) -> str | list[dict[str, Any]]:
+    if isinstance(task, Message):
+        return task.content or ""
+    if isinstance(task, list) and all(isinstance(item, dict) for item in task):
+        return task
+    return str(task)
 
 
 def _load_json_text(text: str) -> Any:

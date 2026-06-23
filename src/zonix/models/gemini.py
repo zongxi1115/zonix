@@ -6,6 +6,13 @@ from typing import Any
 
 from zonix.events import ReasoningDelta, TextDelta, TextEnd, TextStart
 from zonix.exceptions import ModelError
+from zonix.content import (
+    content_blocks,
+    content_text,
+    image_media_type,
+    image_source,
+    split_data_url,
+)
 from zonix.types import ToolCall, Usage
 
 from .base import BaseChatModel, ModelRequest, ModelResponse, SupportsEmit
@@ -68,8 +75,9 @@ class Gemini(BaseChatModel):
         system_parts: list[str] = []
         for message in request.messages:
             if message.role == "system":
-                if message.content:
-                    system_parts.append(message.content)
+                text = content_text(message.content)
+                if text:
+                    system_parts.append(text)
                 continue
             role = "model" if message.role == "assistant" else "user"
             if message.role == "tool":
@@ -90,7 +98,7 @@ class Gemini(BaseChatModel):
                     }
                 )
                 continue
-            contents.append({"role": role, "parts": [{"text": message.content or ""}]})
+            contents.append({"role": role, "parts": _gemini_parts(message.content)})
         return contents, "\n\n".join(system_parts) or None
 
     def _tools(self, tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -252,6 +260,52 @@ class Gemini(BaseChatModel):
             status="completed",
             finish_reason=_finish_reason(response),
         )
+
+
+def _gemini_parts(content: Any) -> list[dict[str, Any]]:
+    if content is None or isinstance(content, str):
+        return [{"text": content or ""}]
+
+    parts: list[dict[str, Any]] = []
+    for block in content_blocks(content):
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"text", "input_text"}:
+            text = block.get("text", block.get("content"))
+            if isinstance(text, str) and text:
+                parts.append({"text": text})
+            continue
+        if block_type in {"image", "image_url", "input_image"}:
+            image = _gemini_image_part(block)
+            if image:
+                parts.append(image)
+    return parts or [{"text": content_text(content)}]
+
+
+def _gemini_image_part(block: dict[str, Any]) -> dict[str, Any] | None:
+    source = image_source(block)
+    if not source:
+        return None
+    media_type, data = split_data_url(source)
+    if data is not None:
+        return {
+            "inline_data": {
+                "mime_type": image_media_type(block) or media_type or "image/png",
+                "data": data,
+            }
+        }
+    if source.startswith(("http://", "https://")):
+        return {
+            "file_data": {
+                "mime_type": image_media_type(block) or "image/png",
+                "file_uri": source,
+            }
+        }
+    return {
+        "inline_data": {
+            "mime_type": image_media_type(block) or "image/png",
+            "data": source,
+        }
+    }
 
 
 def _parts(response: Any) -> list[Any]:

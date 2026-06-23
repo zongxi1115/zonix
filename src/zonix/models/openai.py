@@ -15,6 +15,7 @@ from zonix.events import (
     ToolInputStart,
 )
 from zonix.exceptions import ModelError
+from zonix.content import content_blocks, image_detail, image_source
 from zonix.types import ToolCall, Usage
 
 from .base import BaseChatModel, ModelRequest, ModelResponse, SupportsEmit
@@ -100,12 +101,12 @@ class OpenAI(BaseChatModel):
         for message in request.messages:
             item: dict[str, Any] = {
                 "role": message.role,
-                "content": message.content or "",
+                "content": _chat_content(message.content),
                 **({"name": message.name} if message.name and message.role != "tool" else {}),
                 **({"tool_call_id": message.tool_call_id} if message.tool_call_id else {}),
             }
             if message.role == "assistant" and message.data.get("tool_calls"):
-                item["content"] = message.content
+                item["content"] = _chat_content(message.content)
                 item["tool_calls"] = [
                     {
                         "id": call["call_id"],
@@ -155,13 +156,13 @@ class OpenAI(BaseChatModel):
                     {
                         "type": "function_call_output",
                         "call_id": message.tool_call_id or message.name or "tool",
-                        "output": message.content or "",
+                        "output": _string_content(message.content),
                     }
                 )
                 continue
             if message.role == "assistant" and message.data.get("tool_calls"):
                 if message.content:
-                    items.append({"role": "assistant", "content": message.content})
+                    items.append({"role": "assistant", "content": _responses_content(message.content)})
                 for call in message.data["tool_calls"]:
                     items.append(
                         {
@@ -172,7 +173,7 @@ class OpenAI(BaseChatModel):
                         }
                     )
                 continue
-            items.append({"role": message.role, "content": message.content or ""})
+            items.append({"role": message.role, "content": _responses_content(message.content)})
         return items
 
     def _responses_tools(self, tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -523,6 +524,68 @@ def _schema_name(name: str | None) -> str:
     raw = name or "zonix_output"
     cleaned = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in raw)
     return cleaned[:64] or "zonix_output"
+
+
+def _string_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    text_parts: list[str] = []
+    for block in content_blocks(content):
+        if str(block.get("type") or "") in {"text", "input_text"}:
+            text = block.get("text", block.get("content"))
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "\n".join(text_parts)
+
+
+def _chat_content(content: Any) -> str | list[dict[str, Any]]:
+    if content is None or isinstance(content, str):
+        return content or ""
+
+    parts: list[dict[str, Any]] = []
+    for block in content_blocks(content):
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"text", "input_text"}:
+            text = block.get("text", block.get("content"))
+            if isinstance(text, str) and text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if block_type in {"image", "image_url", "input_image"}:
+            source = image_source(block)
+            if not source:
+                continue
+            image_url: dict[str, Any] = {"url": source}
+            detail = image_detail(block)
+            if detail:
+                image_url["detail"] = detail
+            parts.append({"type": "image_url", "image_url": image_url})
+    return parts or _string_content(content)
+
+
+def _responses_content(content: Any) -> str | list[dict[str, Any]]:
+    if content is None or isinstance(content, str):
+        return content or ""
+
+    parts: list[dict[str, Any]] = []
+    for block in content_blocks(content):
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"text", "input_text"}:
+            text = block.get("text", block.get("content"))
+            if isinstance(text, str) and text:
+                parts.append({"type": "input_text", "text": text})
+            continue
+        if block_type in {"image", "image_url", "input_image"}:
+            source = image_source(block)
+            if not source:
+                continue
+            item: dict[str, Any] = {"type": "input_image", "image_url": source}
+            detail = image_detail(block)
+            if detail:
+                item["detail"] = detail
+            parts.append(item)
+    return parts or _string_content(content)
 
 
 def _openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:

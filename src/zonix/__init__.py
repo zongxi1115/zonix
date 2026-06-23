@@ -12,8 +12,18 @@ from .events import (
     ToolInputStart,
     ToolOutputAvailable,
 )
+from .content import image_part, text_part
 from .graph import GraphEdge, GraphNode, GraphSpec
 from .spec import Agent, agent, router, team, workflow
+from .sync import iter_async_sync, run_sync
+from .tools import (
+    ToolApprovalRequired,
+    ToolCallAllowed,
+    ToolCallDenied,
+    ToolEscalationRequired,
+    ToolMiddleware,
+    ToolMiddlewareContext,
+)
 from .types import (
     Message,
     ModelCall,
@@ -24,6 +34,7 @@ from .types import (
     Span,
     ToolCall,
     Usage,
+    ApprovalHandler,
     assistant_message,
     assistant_tool_call_message,
     coerce_messages,
@@ -35,6 +46,7 @@ from .types import (
 __all__ = [
     "Agent",
     "ApprovalRequired",
+    "ApprovalHandler",
     "ErrorEvent",
     "Event",
     "Finish",
@@ -52,7 +64,13 @@ __all__ = [
     "TextDelta",
     "TextEnd",
     "TextStart",
+    "ToolApprovalRequired",
     "ToolCall",
+    "ToolCallAllowed",
+    "ToolCallDenied",
+    "ToolEscalationRequired",
+    "ToolMiddleware",
+    "ToolMiddlewareContext",
     "ToolInputAvailable",
     "ToolInputDelta",
     "ToolInputStart",
@@ -65,7 +83,11 @@ __all__ = [
     "router",
     "system_message",
     "team",
+    "image_part",
+    "iter_async_sync",
+    "run_sync",
     "tool_message",
+    "text_part",
     "user_message",
     "workflow",
 ]

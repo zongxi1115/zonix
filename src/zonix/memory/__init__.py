@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from zonix.content import content_text
 from zonix.types import Message
 
 
@@ -57,13 +58,15 @@ class Summarize:
         return MemoryStack([self]) + other
 
     async def apply(self, history: list[Message], current: Any, ctx: Any) -> list[Message]:
-        total_chars = sum(len(message.content or "") for message in history)
+        total_chars = sum(
+            len(content_text(message.content, include_images=True)) for message in history
+        )
         if total_chars <= self.over:
             return list(history)
         older = history[: -self.keep]
         recent = history[-self.keep :]
         summary = "Earlier conversation summary: " + " ".join(
-            (message.content or "")[:200] for message in older
+            content_text(message.content, include_images=True)[:200] for message in older
         )
         return [Message(role="system", content=summary)] + recent
 

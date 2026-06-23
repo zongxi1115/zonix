@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from .events import ErrorEvent, Finish, NodeEnd, NodeStart
 from .exceptions import RunPaused
-from .types import Message, MessageLike, RunResult, RunState, Span, Usage, coerce_messages
+from .types import (
+    ApprovalDecision,
+    ApprovalHandler,
+    Message,
+    MessageLike,
+    RunResult,
+    RunState,
+    Span,
+    Usage,
+    coerce_messages,
+)
 
 
 class EventBus:
@@ -111,6 +122,27 @@ async def run_node(
     return result
 
 
+async def resolve_approvals(
+    result: RunResult,
+    approval: ApprovalHandler | None,
+) -> RunResult:
+    if approval is None:
+        return result
+
+    current = result
+    while current.paused:
+        if current.pending is None:
+            return current
+        decision = approval(current.pending)
+        if inspect.isawaitable(decision):
+            decision = await decision
+        if isinstance(decision, dict):
+            current = await current.resume(approve=True, input=decision)
+        else:
+            current = await current.resume(approve=bool(decision))
+    return current
+
+
 async def stream_node(
     node: Any,
     task: Any,
@@ -122,8 +154,13 @@ async def stream_node(
     approvals: dict[str, Any] | None = None,
 ) -> AsyncIterator[Any]:
     queue: asyncio.Queue[Any] = asyncio.Queue()
+    done = object()
+    emitted_error = False
 
     async def emit(event: Any) -> None:
+        nonlocal emitted_error
+        if isinstance(event, ErrorEvent):
+            emitted_error = True
         await queue.put(event)
 
     async def worker() -> None:
@@ -138,17 +175,20 @@ async def stream_node(
                 approvals=approvals,
                 emit=emit,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if not emitted_error:
+                await queue.put(ErrorEvent((), str(exc), type(exc).__name__))
+        finally:
+            await queue.put(done)
 
     task_obj = asyncio.create_task(worker())
     try:
         while True:
             event = await queue.get()
+            if event is done:
+                break
             yield event
             if isinstance(event, Finish):
-                break
-            if isinstance(event, ErrorEvent) and task_obj.done():
                 break
     finally:
         await task_obj

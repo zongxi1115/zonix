@@ -13,6 +13,13 @@ from zonix.events import (
     ToolInputDelta,
     ToolInputStart,
 )
+from zonix.content import (
+    content_blocks,
+    content_text,
+    image_media_type,
+    image_source,
+    split_data_url,
+)
 from zonix.exceptions import ModelError
 from zonix.types import ToolCall, Usage
 
@@ -92,8 +99,9 @@ class Anthropic(BaseChatModel):
 
         for message in request.messages:
             if message.role == "system":
-                if message.content:
-                    system_parts.append(message.content)
+                text = content_text(message.content)
+                if text:
+                    system_parts.append(text)
                 continue
             if message.role == "tool":
                 messages.append(
@@ -119,8 +127,9 @@ class Anthropic(BaseChatModel):
                 continue
             if message.role == "assistant" and message.data.get("tool_calls"):
                 content: list[dict[str, Any]] = []
-                if message.content:
-                    content.append({"type": "text", "text": message.content})
+                text = content_text(message.content)
+                if text:
+                    content.append({"type": "text", "text": text})
                 for call in message.data["tool_calls"]:
                     content.append(
                         {
@@ -133,7 +142,7 @@ class Anthropic(BaseChatModel):
                 messages.append({"role": "assistant", "content": content})
                 continue
             role = "assistant" if message.role == "assistant" else "user"
-            messages.append({"role": role, "content": message.content or ""})
+            messages.append({"role": role, "content": _anthropic_content(message.content)})
 
         return "\n\n".join(system_parts) or None, messages
 
@@ -353,6 +362,60 @@ class Anthropic(BaseChatModel):
         for call in parsed.tool_calls:
             await emit(ToolInputAvailable(path, call.call_id, call.tool, call.input))
         return parsed
+
+
+def _anthropic_content(content: Any) -> str | list[dict[str, Any]]:
+    if content is None or isinstance(content, str):
+        return content or ""
+
+    blocks: list[dict[str, Any]] = []
+    for block in content_blocks(content):
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"text", "input_text"}:
+            text = block.get("text", block.get("content"))
+            if isinstance(text, str) and text:
+                blocks.append({"type": "text", "text": text})
+            continue
+        if block_type in {"image", "image_url", "input_image"}:
+            image = _anthropic_image_block(block)
+            if image:
+                blocks.append(image)
+    return blocks or content_text(content)
+
+
+def _anthropic_image_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    source = image_source(block)
+    if not source:
+        return None
+
+    media_type, data = split_data_url(source)
+    if data is not None:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image_media_type(block) or media_type or "image/png",
+                "data": data,
+            },
+        }
+
+    if source.startswith(("http://", "https://")):
+        return {
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": source,
+            },
+        }
+
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": image_media_type(block) or "image/png",
+            "data": source,
+        },
+    }
 
 
 def _dump(value: Any) -> Any:

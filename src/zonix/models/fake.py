@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from zonix.content import content_text
 from zonix.types import Usage
 
 from .base import BaseChatModel, ModelRequest, ModelResponse
@@ -16,7 +17,7 @@ class Echo(BaseChatModel):
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         last = next((m for m in reversed(request.messages) if m.role == "user"), None)
-        text = last.content if last else ""
+        text = content_text(last.content, include_images=True) if last else ""
         return ModelResponse(text=text, usage=Usage(model_calls=1))
 
 

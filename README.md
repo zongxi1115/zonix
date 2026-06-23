@@ -194,6 +194,25 @@ async def write_file(ctx, path: str, content: str) -> bool:
 If a tool takes `ctx` as its first parameter, Zonix passes a `ToolContext` with
 `deps`, shared usage, the current run state, and the owning agent.
 
+Tools can require approval before execution. Register the approval handler with
+the tools that share the same approval flow, so the run loop does not need a
+large central router.
+
+```python
+def review_tool_call(pending):
+    print(pending.tool, pending.input)
+    return True
+
+
+assistant = agent("assistant").use(send_email, approval=review_tool_call)
+run = await assistant.run("send the draft")
+```
+
+Middleware is for more involved interception, such as blocking a call, rewriting
+parsed input, or requiring approval only under specific runtime conditions.
+Without a registered approval handler, `run()` returns a paused `RunResult` that
+can be resumed later from a UI, queue, or separate process.
+
 ## Three call levels
 
 ```python
@@ -207,6 +226,19 @@ async for event in planner.stream(task, ctx=ctx):
 All three calls use the same run engine. The engine owns prompt assembly, model
 calls, tool execution, output validation, usage aggregation, spans, checkpoints,
 and event emission.
+
+Synchronous callers can use the explicit blocking facade:
+
+```python
+output = planner.call_sync(task, ctx=ctx)
+run = planner.run_sync(task, ctx=ctx)
+
+for event in planner.stream_sync(task, ctx=ctx):
+    print(event)
+```
+
+The async engine remains the source of truth; the sync facade bridges it for
+scripts, CLIs, notebooks, and other non-async entry points.
 
 `.run()` is the inspection layer:
 

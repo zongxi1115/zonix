@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
 from pydantic import TypeAdapter
 
 from zonix.exceptions import MaxStepsExceeded
 from zonix.graph import GraphEdge, GraphNode, GraphSpec, safe_graph_id
-from zonix.runtime import run_node, stream_node
-from zonix.types import MessageLike, Node, Route, RunResult, RunState
+from zonix.runtime import resolve_approvals, run_node, stream_node
+from zonix.sync import iter_async_sync, run_sync as _run_sync
+from zonix.types import ApprovalHandler, MessageLike, Node, Route, RunResult, RunState
 
 
 class RouterNode:
@@ -74,10 +75,36 @@ class TeamNode:
         ctx: Any = None,
         session: Any = None,
         message_history: list[MessageLike] | None = None,
+        approval: ApprovalHandler | None = None,
     ) -> Any:
         return (
-            await self.run(task, ctx=ctx, session=session, message_history=message_history)
+            await self.run(
+                task,
+                ctx=ctx,
+                session=session,
+                message_history=message_history,
+                approval=approval,
+            )
         ).output
+
+    def solve_sync(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+        approval: ApprovalHandler | None = None,
+    ) -> Any:
+        return _run_sync(
+            lambda: self.solve(
+                task,
+                ctx=ctx,
+                session=session,
+                message_history=message_history,
+                approval=approval,
+            )
+        )
 
     async def run(
         self,
@@ -87,8 +114,33 @@ class TeamNode:
         session: Any = None,
         message_history: list[MessageLike] | None = None,
         trace: bool = True,
+        approval: ApprovalHandler | None = None,
     ) -> RunResult:
-        return await run_node(self, task, ctx=ctx, session=session, message_history=message_history)
+        return await resolve_approvals(
+            await run_node(self, task, ctx=ctx, session=session, message_history=message_history),
+            approval,
+        )
+
+    def run_sync(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+        trace: bool = True,
+        approval: ApprovalHandler | None = None,
+    ) -> RunResult:
+        return _run_sync(
+            lambda: self.run(
+                task,
+                ctx=ctx,
+                session=session,
+                message_history=message_history,
+                trace=trace,
+                approval=approval,
+            )
+        )
 
     def stream(
         self,
@@ -99,6 +151,23 @@ class TeamNode:
         message_history: list[MessageLike] | None = None,
     ) -> AsyncIterator[Any]:
         return stream_node(self, task, ctx=ctx, session=session, message_history=message_history)
+
+    def stream_sync(
+        self,
+        task: Any,
+        *,
+        ctx: Any = None,
+        session: Any = None,
+        message_history: list[MessageLike] | None = None,
+    ) -> Iterator[Any]:
+        return iter_async_sync(
+            lambda: self.stream(
+                task,
+                ctx=ctx,
+                session=session,
+                message_history=message_history,
+            )
+        )
 
     def graph(self) -> GraphSpec:
         router_id = safe_graph_id(f"router_{self.router.name}")

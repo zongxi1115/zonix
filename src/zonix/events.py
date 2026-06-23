@@ -92,6 +92,9 @@ class ApprovalRequired(Event):
     call_id: str
     tool: str
     input: dict[str, Any]
+    action: str = "require_approval"
+    reason: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
