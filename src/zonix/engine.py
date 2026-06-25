@@ -353,6 +353,7 @@ class RunEngine:
                     st=st,
                 )
                 return
+            normalized_call = ToolCall(call_id=call.call_id, tool=call.tool, input=parsed_input)
 
         ctx = ToolContext(
             deps=st.ctx,

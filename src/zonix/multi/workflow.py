@@ -7,7 +7,8 @@ from typing import Any
 
 from zonix.graph import GraphEdge, GraphNode, GraphSpec, safe_graph_id
 from zonix.runtime import resolve_approvals, run_node, stream_node
-from zonix.sync import iter_async_sync, run_sync as _run_sync
+from zonix.sync import iter_async_sync
+from zonix.sync import run_sync as _run_sync
 from zonix.types import ApprovalHandler, MessageLike, Node, RunResult, RunState
 
 
@@ -67,9 +68,11 @@ class WorkflowNode:
 
     async def invoke(self, x: Any, st: RunState) -> Any:
         current = x
-        for step in self.steps:
+        for index, step in enumerate(self.steps):
             current = await step.invoke(current, st)
-            st.scratch[getattr(step, "node", step).__class__.__name__] = current
+            node = getattr(step, "node", None)
+            scratch_key = getattr(node, "name", None) or f"{index}:{type(step).__name__}"
+            st.scratch[scratch_key] = current
         return current
 
     async def solve(

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2
+
+- Kept approved tool input overrides in sync with `ToolContext.call.input`.
+- Stored workflow scratch outputs by node name instead of class name to avoid
+  overwriting repeated agent steps.
+- Treated typed first parameters such as `ctx: str` as normal tool inputs while
+  preserving untyped `ctx`/`context` as framework context parameters.
+
 ## 0.3.0
 
 - Added model call inspection on `RunResult`, including raw upstream requests,

@@ -96,9 +96,9 @@ def coerce_middleware_result(value: Any) -> ToolMiddlewareResult:
 
 
 def _is_context_param(name: str, annotation: Any) -> bool:
-    if name in {"ctx", "context"}:
+    if annotation is ToolContext:
         return True
-    return annotation is ToolContext
+    return name in {"ctx", "context"} and annotation is Any
 
 
 def _approval_parts(
